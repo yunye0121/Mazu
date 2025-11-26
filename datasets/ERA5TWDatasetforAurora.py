@@ -70,8 +70,8 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
                 "static_vars": {
                     v: torch.tensor(
                         _ds[v].sel(
-                            latitude=slice(*self.latitude),
-                            longitude=slice(*self.longitude),
+                            latitude = slice(*self.latitude),
+                            longitude = slice(*self.longitude),
                         ).values
                     ).squeeze()
                     for v in self.static_variables

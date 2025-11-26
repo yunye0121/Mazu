@@ -206,7 +206,7 @@ def train_epoch(
     total_train_loss = 0.0
     total_train_samples = 0
 
-    latitudes, longitude = dataloader.dataset.get_latitude_longitude()
+    latitude, longitude = dataloader.dataset.get_latitude_longitude()
     levels = dataloader.dataset.get_levels()
     static_data = dataloader.dataset.get_static_vars_ds()
 
@@ -230,7 +230,7 @@ def train_epoch(
                 atmos_vars = train_input["atmos_vars"],
                 static_vars = static_data["static_vars"],
                 metadata = Metadata(
-                    lat = latitudes,
+                    lat = latitude,
                     lon = longitude,
                     time = tuple(map(lambda d: pd.Timestamp(d), train_dates)),
                     atmos_levels = levels,
@@ -241,7 +241,7 @@ def train_epoch(
                 atmos_vars = train_label['atmos_vars'],
                 static_vars = static_data["static_vars"],
                 metadata = Metadata(
-                    lat = latitudes,
+                    lat = latitude,
                     lon = longitude,
                     time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), train_dates)),
                     atmos_levels = levels,
@@ -324,7 +324,7 @@ def val_epoch(
     total_val_loss = 0.0
     total_val_samples = 0
 
-    latitudes, longitude = dataloader.dataset.get_latitude_longitude()
+    latitude, longitude = dataloader.dataset.get_latitude_longitude()
     levels = dataloader.dataset.get_levels()
     static_data = dataloader.dataset.get_static_vars_ds()
 
@@ -344,7 +344,7 @@ def val_epoch(
                     atmos_vars = val_input["atmos_vars"],
                     static_vars = static_data["static_vars"],
                     metadata = Metadata(
-                        lat = latitudes,
+                        lat = latitude,
                         lon = longitude,
                         time = tuple(map(lambda d: pd.Timestamp(d), val_dates)),
                         atmos_levels = levels,
@@ -355,7 +355,7 @@ def val_epoch(
                     atmos_vars = val_label['atmos_vars'],
                     static_vars = static_data["static_vars"],
                     metadata = Metadata(
-                        lat = latitudes,
+                        lat = latitude,
                         lon = longitude,
                         time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), val_dates)),
                         atmos_levels = levels,
