@@ -19,6 +19,8 @@ from safetensors.torch import load_file
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
 
+from discriminator.ResNet_discriminator import ResNetDiscriminator
+
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 
 from utils.metrics import AuroraMAELoss
@@ -51,6 +53,21 @@ def parse_args():
     parser.add_argument("--bf16_mode", action = "store_true")
     parser.add_argument("--timestep_hours", type = int, default = 6)
     parser.add_argument("--stabilise_level_agg", action = "store_true")
+
+    parser.add_argument(
+        "--use_adversarial_loss",
+        action = "store_true",
+    )
+    parser.add_argument(
+        "--adv_lambda",
+        type = float,
+        default = 0.01,
+    )
+    parser.add_argument(
+        "--discriminator_checkpoint_path",
+        type = str,
+        default = None,
+    )
 
     parser.add_argument("--upper_variables", type = str, nargs = "+", required = True)
     parser.add_argument("--surface_variables", type = str, nargs = "+", required = True)
@@ -102,6 +119,28 @@ def create_model(
         state_dict = load_file(args.checkpoint_path)
         model.load_state_dict(state_dict, strict = False)
     return model
+
+def create_discriminator(args):
+    discriminator = ResNetDiscriminator(
+        surface_variables = args.surface_variables,
+        upper_variables = args.upper_variables,
+        levels = args.levels,
+        backbone_name = "resnet50",
+        pretrained = False,
+    )
+
+    if args.discriminator_checkpoint_path is not None:
+        logger.info(f"Loading discriminator checkpoint from {args.discriminator_checkpoint_path}")
+        state_dict = load_file(args.discriminator_checkpoint_path)
+        discriminator.load_state_dict(state_dict, strict = False)
+
+    for p in discriminator.parameters():
+        p.requires_grad = False
+
+    discriminator.eval()
+
+    return discriminator
+
 
 def create_dataset(args, split):
     if split == "train":
@@ -188,10 +227,12 @@ def save_checkpoint_best_by_val_loss(
 def train_epoch(
         args,
         model,
+        discriminator,
         dataloader,
         optimizer,
         scheduler,
         criterion,
+        adversarial_loss_criterion,
         accelerator,
         epoch,
         train_global_step,
@@ -203,6 +244,9 @@ def train_epoch(
     
     total_train_loss = 0.0
     total_train_samples = 0
+
+    total_adv_loss = 0.0
+    total_var_loss = 0.0
 
     latitude, longitude = dataloader.dataset.get_latitude_longitude()
     levels = dataloader.dataset.get_levels()
@@ -256,7 +300,28 @@ def train_epoch(
                 _label.normalise(surf_stats = unwrapped_model.surf_stats),
             )
             
-            loss = loss_dict["all_vars"]
+            # loss = loss_dict["all_vars"]
+            var_loss = loss_dict["all_vars"]
+            
+            if args.use_adversarial_loss and discriminator is not None:
+                
+                # with torch.no_grad():
+                discriminator_pred = discriminator(_pred).view(-1)
+                
+                discriminator_label = torch.ones_like(discriminator_pred)
+                adversarial_loss = adversarial_loss_criterion( discriminator_pred, discriminator_label )
+                print("Adversarial Loss Computation:")
+                print(f"{discriminator_pred=}")
+                print(f"{discriminator_label=}")
+                print(f"{adversarial_loss=}")
+                # print(f"{var_loss.shape=}")
+                # print(f"{discriminator_pred.shape=}")
+                # print(f"{discriminator_label.shape=}")
+                # print(f"{adversarial_loss.shape=}")
+                loss = (1 - args.adv_lambda) * var_loss + args.adv_lambda * adversarial_loss
+                # print(f"{loss.shape=}")
+            else:
+                loss = var_loss
 
         accelerator.backward(loss.mean())
 
@@ -286,38 +351,78 @@ def train_epoch(
         current_lr = optimizer.param_groups[0]["lr"]
         step_loss = gather_train_loss.mean().item()
 
+        if args.use_adversarial_loss and discriminator is not None:
+            gather_var_loss = accelerator.gather( var_loss )
+            gather_adv_loss = accelerator.gather( adversarial_loss )
+            total_var_loss += gather_var_loss.sum().item()
+            total_adv_loss += gather_adv_loss.sum().item()
+            step_var_loss = gather_var_loss.mean().item()
+            step_adv_loss = gather_adv_loss.mean().item()
+
         if accelerator.is_main_process:
-            pbar.set_postfix({
-                "train_step_loss": f"{step_loss:.8f}",
-            })
-            accelerator.log(
-                {
-                    "train_global_step": train_global_step,
-                    "train/step_loss": step_loss,
-                    "lr": current_lr,
-                    "grad_norm": total_grad_norm,
-                },
-            )
+            if args.use_adversarial_loss and discriminator is not None:
+                pbar.set_postfix({
+                    "train_step_loss": f"{step_loss:.8f}",
+                    "var_loss": f"{step_var_loss:.8f}",
+                    "adv_loss": f"{step_adv_loss:.8f}",
+                })
+                accelerator.log(
+                    {
+                        "train_global_step": train_global_step,
+                        "train/step_loss": step_loss,
+                        "lr": current_lr,
+                        "grad_norm": total_grad_norm,
+                        "train/step_var_loss": step_var_loss,
+                        "train/step_adv_loss": step_adv_loss,
+                    },
+                )
+            else:
+                pbar.set_postfix({
+                    "train_step_loss": f"{step_loss:.8f}",
+                })
+                accelerator.log(
+                    {
+                        "train_global_step": train_global_step,
+                        "train/step_loss": step_loss,
+                        "lr": current_lr,
+                        "grad_norm": total_grad_norm,
+                    },
+                )
         
         train_global_step += 1
+        # print(f"{total_train_loss=}, {total_train_samples=}")
 
     train_epoch_loss = total_train_loss / total_train_samples
     
     if accelerator.is_main_process:
-        accelerator.log(
-            {
-                "epoch": epoch,
-                "train/epoch_loss": train_epoch_loss,
-            },
-        )
+        if args.use_adversarial_loss and discriminator is not None:
+            train_epoch_var_loss = total_var_loss / total_train_samples
+            train_epoch_adv_loss = total_adv_loss / total_train_samples
+            accelerator.log(
+                {
+                    "epoch": epoch,
+                    "train/epoch_loss": train_epoch_loss,
+                    "train/epoch_var_loss": train_epoch_var_loss,
+                    "train/epoch_adv_loss": train_epoch_adv_loss,
+                },
+            )
+        else:
+            accelerator.log(
+                {
+                    "epoch": epoch,
+                    "train/epoch_loss": train_epoch_loss,
+                },
+            )
 
     return train_epoch_loss, train_global_step
 
 def val_epoch(
         args,
         model,
+        discriminator,
         dataloader,
         criterion,
+        adversarial_loss_criterion,
         accelerator,
         epoch,
         val_global_step,
@@ -328,20 +433,24 @@ def val_epoch(
     total_val_loss = 0.0
     total_val_samples = 0
 
+    # for logging var/adv loss when using adversarial loss
+    total_val_var_loss = 0.0
+    total_val_adv_loss = 0.0
+
     latitude, longitude = dataloader.dataset.get_latitude_longitude()
     levels = dataloader.dataset.get_levels()
     static_data = dataloader.dataset.get_static_vars_ds()
 
     pbar = tqdm(
-        dataloader, 
-        disable = not accelerator.is_local_main_process, 
+        dataloader,
+        disable = not accelerator.is_local_main_process,
         desc = f"val_epoch: {epoch}",
-        # ncols = 120,
     )
 
     with torch.inference_mode():
         for batch in pbar:
             val_input, val_label, val_dates = batch
+
             with accelerator.autocast():
                 _input = Batch(
                     surf_vars = val_input["surf_vars"],
@@ -355,8 +464,8 @@ def val_epoch(
                     ),
                 )
                 _label = Batch(
-                    surf_vars = val_label['surf_vars'],
-                    atmos_vars = val_label['atmos_vars'],
+                    surf_vars = val_label["surf_vars"],
+                    atmos_vars = val_label["atmos_vars"],
                     static_vars = static_data["static_vars"],
                     metadata = Metadata(
                         lat = latitude,
@@ -365,41 +474,119 @@ def val_epoch(
                         atmos_levels = levels,
                     ),
                 )
+
                 _pred = model(_input)
+
+                # var loss (same as before)
                 loss_dict = criterion(
                     _pred.normalise(surf_stats = unwrapped_model.surf_stats),
-                    _label.normalise(surf_stats = unwrapped_model.surf_stats)
+                    _label.normalise(surf_stats = unwrapped_model.surf_stats),
                 )
-                loss = loss_dict["all_vars"]
+                var_loss = loss_dict["all_vars"]
 
+                # adversarial part (mirror train_epoch)
+                if (
+                    args.use_adversarial_loss
+                    and discriminator is not None
+                    and adversarial_loss_criterion is not None
+                ):
+                    # discriminator is frozen; we still use it in val under no-grad
+                    # with torch.no_grad():
+                    discriminator_pred = discriminator(_pred).view(-1)
+                    discriminator_label = torch.ones_like(discriminator_pred)
+                    adversarial_loss = adversarial_loss_criterion(
+                        discriminator_pred,
+                        discriminator_label,
+                    )
+
+                    loss = (1 - args.adv_lambda) * var_loss + args.adv_lambda * adversarial_loss
+                else:
+                    adversarial_loss = None  # just for clarity
+                    loss = var_loss
+
+            # gather main loss
             gather_val_loss = accelerator.gather(loss)
             total_val_loss += gather_val_loss.sum().item()
             total_val_samples += gather_val_loss.shape[0]
-
             step_loss = gather_val_loss.mean().item()
 
+            # gather and log components when using adversarial loss
+            if (
+                args.use_adversarial_loss
+                and discriminator is not None
+                and adversarial_loss_criterion is not None
+            ):
+                gather_val_var_loss = accelerator.gather(var_loss)
+                gather_val_adv_loss = accelerator.gather(adversarial_loss)
+
+                total_val_var_loss += gather_val_var_loss.sum().item()
+                total_val_adv_loss += gather_val_adv_loss.sum().item()
+
+                step_var_loss = gather_val_var_loss.mean().item()
+                step_adv_loss = gather_val_adv_loss.mean().item()
+
             if accelerator.is_main_process:
-                pbar.set_postfix({"val_step_loss": f"{step_loss:.8f}"})
-                accelerator.log(
-                    {
-                        "val_global_step": val_global_step,
-                        "val/step_loss": step_loss,
-                    },
-                )
+                if (
+                    args.use_adversarial_loss
+                    and discriminator is not None
+                    and adversarial_loss_criterion is not None
+                ):
+                    pbar.set_postfix(
+                        {
+                            "val_step_loss": f"{step_loss:.8f}",
+                            "val_var_loss": f"{step_var_loss:.8f}",
+                            "val_adv_loss": f"{step_adv_loss:.8f}",
+                        },
+                    )
+                    accelerator.log(
+                        {
+                            "val_global_step": val_global_step,
+                            "val/step_loss": step_loss,
+                            "val/step_var_loss": step_var_loss,
+                            "val/step_adv_loss": step_adv_loss,
+                        },
+                    )
+                else:
+                    pbar.set_postfix(
+                        {"val_step_loss": f"{step_loss:.8f}"},
+                    )
+                    accelerator.log(
+                        {
+                            "val_global_step": val_global_step,
+                            "val/step_loss": step_loss,
+                        },
+                    )
 
             val_global_step += 1
 
     val_epoch_loss = total_val_loss / total_val_samples
 
     if accelerator.is_main_process:
-        accelerator.log(
-            {
-                "epoch": epoch,
-                "val/epoch_loss": val_epoch_loss,
-            },
-        )
+        if (
+            args.use_adversarial_loss
+            and discriminator is not None
+            and adversarial_loss_criterion is not None
+        ):
+            val_epoch_var_loss = total_val_var_loss / total_val_samples
+            val_epoch_adv_loss = total_val_adv_loss / total_val_samples
+            accelerator.log(
+                {
+                    "epoch": epoch,
+                    "val/epoch_loss": val_epoch_loss,
+                    "val/epoch_var_loss": val_epoch_var_loss,
+                    "val/epoch_adv_loss": val_epoch_adv_loss,
+                },
+            )
+        else:
+            accelerator.log(
+                {
+                    "epoch": epoch,
+                    "val/epoch_loss": val_epoch_loss,
+                },
+            )
 
     return val_epoch_loss, val_global_step
+
 
 def main():
     args = parse_args()
@@ -434,12 +621,28 @@ def main():
             run.define_metric("val/step_loss", step_metric = "val_global_step")
             run.define_metric("train/epoch_loss", step_metric = "epoch")
             run.define_metric("val/epoch_loss", step_metric = "epoch")
+            if args.use_adversarial_loss:
+                run.define_metric("train/step_var_loss", step_metric = "train_global_step")
+                run.define_metric("train/step_adv_loss", step_metric = "train_global_step")
+                run.define_metric("train/epoch_var_loss", step_metric = "epoch")
+                run.define_metric("train/epoch_adv_loss", step_metric = "epoch")
+
+                run.define_metric("val/step_var_loss", step_metric = "val_global_step")
+                run.define_metric("val/step_adv_loss", step_metric = "val_global_step")
+                run.define_metric("val/epoch_var_loss", step_metric = "epoch")
+                run.define_metric("val/epoch_adv_loss", step_metric = "epoch")
+
 
     logger.info(accelerator.state)
 
     model = create_model(args)
     train_dataset = create_dataset(args, "train")
     val_dataset = create_dataset(args, "val")
+
+    if args.use_adversarial_loss:
+        discriminator = create_discriminator(args)
+    else:
+        discriminator = None
 
     train_loader = DataLoader(
         train_dataset, batch_size = args.train_batch_size, shuffle = True,
@@ -457,6 +660,10 @@ def main():
     )
 
     criterion = AuroraMAELoss
+    if discriminator:
+        adversarial_loss_criterion = torch.nn.BCEWithLogitsLoss( reduction = "none" )
+    else:
+        adversarial_loss_criterion = None
 
     total_training_steps = args.epochs * len(train_loader)
     warmup_steps = int(args.warmup_step_ratio * total_training_steps)
@@ -468,9 +675,23 @@ def main():
         schedule_type = "cosine",
     )
 
-    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, val_loader, scheduler,
-    )
+    if discriminator:
+        model, discriminator, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+            model, discriminator, optimizer, train_loader, val_loader, scheduler,
+        )
+    else:
+        model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+            model, optimizer, train_loader, val_loader, scheduler,
+        )
+
+    if discriminator:
+        disc_unwrapped = accelerator.unwrap_model(discriminator)
+        disc_params_before = {
+            name: p.detach().cpu().clone()
+            for name, p in disc_unwrapped.named_parameters()
+        }
+    else:
+        disc_params_before = None
 
     train_global_step = 0
     val_global_step = 0
@@ -480,10 +701,12 @@ def main():
         train_loss, train_global_step = train_epoch(
             args,
             model,
+            discriminator,
             train_loader,
             optimizer,
             scheduler,
             criterion,
+            adversarial_loss_criterion,
             accelerator,
             epoch,
             train_global_step
@@ -491,11 +714,13 @@ def main():
         val_loss, val_global_step = val_epoch(
             args,
             model,
+            discriminator,
             val_loader,
             criterion,
+            adversarial_loss_criterion,
             accelerator,
             epoch,
-            val_global_step
+            val_global_step,
         )
 
         accelerator.wait_for_everyone()
@@ -520,6 +745,22 @@ def main():
             )
         
         accelerator.wait_for_everyone()
+
+    if discriminator and accelerator.is_main_process:
+        disc_unwrapped = accelerator.unwrap_model(discriminator)
+        changed_params = []
+        for name, p in disc_unwrapped.named_parameters():
+            before = disc_params_before[name]
+            after = p.detach().cpu()
+            if not torch.allclose(before, after):
+                changed_params.append(name)
+
+        if not changed_params:
+            logger.info("Discriminator parameters did NOT change. ✅")
+        else:
+            logger.warning("Discriminator parameters CHANGED for these tensors:")
+            for name in changed_params:
+                logger.warning(f"  - {name}")
 
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

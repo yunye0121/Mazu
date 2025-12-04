@@ -457,12 +457,13 @@ def main():
         )
     
     train_ds = DiscriminatorDataset(
+        AuroraTWDataset = train_Aurora_dataset_list,
         ERA5TWDataset = train_ERA5_dataset_list,
-        AuroraTWDataset = train_Aurora_dataset_list
+        
     )
     val_ds = DiscriminatorDataset(
-        ERA5TWDataset = val_ERA5_dataset_list,
         AuroraTWDataset = val_Aurora_dataset_list,
+        ERA5TWDataset = val_ERA5_dataset_list,
     )
 
     # for sh in args.forecast_hour:

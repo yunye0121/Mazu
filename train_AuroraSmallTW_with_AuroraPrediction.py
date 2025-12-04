@@ -214,7 +214,7 @@ def train_epoch(
         dataloader,
         disable = not accelerator.is_local_main_process,
         desc = f"train_epoch: {epoch}",
-        ncols = 120,
+        # ncols = 120,
     )
 
     for batch in pbar:
@@ -332,7 +332,7 @@ def val_epoch(
         dataloader,
         disable = not accelerator.is_local_main_process,
         desc = f"val_epoch: {epoch}",
-        ncols = 120,
+        # ncols = 120,
     )
 
     with torch.inference_mode():

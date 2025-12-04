@@ -68,12 +68,16 @@ class ResNetDiscriminator(torch.nn.Module):
         else:
             raise ValueError(f"Variable {var_name} not found in mapping dictionary.")
 
-    def forward(self, batch) -> torch.Tensor:
+    def _forward_features(self, batch) -> torch.Tensor:
         # pass
 
         # Access variable value and then combine them into a tensor.
 
+        p = next(self.parameters())
+        batch = batch.type(p.dtype)
         batch = batch.normalise(surf_stats = dict())
+        # batch = batch.crop(patch_size=self.patch_size)
+        batch = batch.to(p.device)
 
         atmos, _ = pack( [batch.atmos_vars[ self.map_var(v) ] for v in self.upper_variables], "b * l h w" )
         surf, _ = pack( [batch.surf_vars[ self.map_var(v) ] for v in self.surface_variables], "b * h w" )
@@ -83,6 +87,30 @@ class ResNetDiscriminator(torch.nn.Module):
         x = all_var_tensor
 
         features = self.backbone(x)
+
+        return features
+
+    def forward(self, batch) -> torch.Tensor:
+        # pass
+
+        # Access variable value and then combine them into a tensor.
+
+        # p = next(self.parameters())
+        # batch = batch.type(p.dtype)
+        # batch = batch.normalise(surf_stats = dict())
+        # batch = batch.to(p.device)
+
+        # # print(f"{batch.static_vars['z'].device=}")
+
+        # atmos, _ = pack( [batch.atmos_vars[ self.map_var(v) ] for v in self.upper_variables], "b * l h w" )
+        # surf, _ = pack( [batch.surf_vars[ self.map_var(v) ] for v in self.surface_variables], "b * h w" )
+    
+        # all_var_tensor, _ = pack( [rearrange( atmos, "b v l h w -> b (v l) h w" ), surf], "b * h w")
+        
+        # x = all_var_tensor
+
+        # features = self.backbone(x)
+        features = self._forward_features(batch)
         output = self.fc(features)
 
         return output
