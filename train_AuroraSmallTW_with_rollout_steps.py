@@ -18,7 +18,8 @@ from safetensors.torch import load_file
 
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
-from aurora.rollout import rollout
+# from aurora.rollout import rollout
+from utils.custom_rollout import rollout_with_multiple_gpu
 
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 
@@ -186,6 +187,17 @@ def save_checkpoint_best_by_val_loss(
 
     return best_ckpts
 
+def slice_timeaxis(labels):
+    timeaxis_length = next(iter(next(iter(labels.values())).values())).shape[1]
+    n_g = {}
+    for i in range(timeaxis_length):
+        n_g[i] = {}
+        for var_type, var_dict in labels.items():
+            n_g[i][var_type] = {}
+            for var_name, tensor in var_dict.items():
+                n_g[i][var_type][var_name] = tensor[:, i : i + 1]
+    return n_g
+
 def train_epoch(
         args,
         model,
@@ -238,26 +250,45 @@ def train_epoch(
                 ),
             )
 
-            _label = Batch(
-                surf_vars = train_label['surf_vars'],
-                atmos_vars = train_label['atmos_vars'],
-                static_vars = static_data["static_vars"],
-                metadata = Metadata(
-                    lat = latitude,
-                    lon = longitude,
-                    time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), train_dates)),
-                    atmos_levels = levels,
-                ),
-            )
+            rollout_preds = [
+                p for p in rollout_with_multiple_gpu(
+                    model,
+                    _model,
+                    _input,
+                    steps = args.rollout_step,
+                )
+            ]
 
-            _pred = model(_input)
+            _label_slices = slice_timeaxis(train_label)
 
-            loss_dict = criterion(
-                _pred.normalise(surf_stats = _model.surf_stats),
-                _label.normalise(surf_stats = _model.surf_stats),
-            )
+            rollout_total_loss = 0.0
+            for step_index, pred in enumerate(rollout_preds):
+                _label = Batch(
+                    surf_vars = _label_slices[step_index]['surf_vars'],
+                    atmos_vars = _label_slices[step_index]['atmos_vars'],
+                    static_vars = static_data["static_vars"],
+                    metadata = Metadata(
+                        lat = latitude,
+                        lon = longitude,
+                        time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), train_dates)),
+                        atmos_levels = levels,
+                    ),
+                )
+                loss_dict = criterion(
+                    pred.normalise(surf_stats = _model.surf_stats),
+                    _label.normalise(surf_stats = _model.surf_stats),
+                )
+                rollout_total_loss += loss_dict["all_vars"]
+            loss = rollout_total_loss / len(rollout_preds)
+
+            # _pred = model(_input)
+
+            # loss_dict = criterion(
+            #     _pred.normalise(surf_stats = _model.surf_stats),
+            #     _label.normalise(surf_stats = _model.surf_stats),
+            # )
             
-            loss = loss_dict["all_vars"]
+            # loss = loss_dict["all_vars"]
 
         accelerator.backward(loss.mean())
 
@@ -355,23 +386,45 @@ def val_epoch(
                         atmos_levels = levels,
                     ),
                 )
-                _label = Batch(
-                    surf_vars = val_label['surf_vars'],
-                    atmos_vars = val_label['atmos_vars'],
-                    static_vars = static_data["static_vars"],
-                    metadata = Metadata(
-                        lat = latitude,
-                        lon = longitude,
-                        time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), val_dates)),
-                        atmos_levels = levels,
-                    ),
-                )
-                _pred = model(_input)
-                loss_dict = criterion(
-                    _pred.normalise(surf_stats = _model.surf_stats),
-                    _label.normalise(surf_stats = _model.surf_stats)
-                )
-                loss = loss_dict["all_vars"]
+
+                rollout_preds = [
+                    p for p in rollout_with_multiple_gpu(
+                        model,
+                        _model,
+                        _input,
+                        steps = args.rollout_step,
+                    )
+                ]
+
+                _label_slices = slice_timeaxis(val_label)
+
+                rollout_total_loss = 0.0
+                for step_index, pred in enumerate(rollout_preds):
+                    _label = Batch(
+                        surf_vars = _label_slices[step_index]['surf_vars'],
+                        atmos_vars = _label_slices[step_index]['atmos_vars'],
+                        static_vars = static_data["static_vars"],
+                        metadata = Metadata(
+                            lat = latitude,
+                            lon = longitude,
+                            time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), val_dates)),
+                            atmos_levels = levels,
+                        ),
+                    )
+                    loss_dict = criterion(
+                        pred.normalise(surf_stats = _model.surf_stats),
+                        _label.normalise(surf_stats = _model.surf_stats),
+                    )
+                    loss = loss_dict["all_vars"]
+                    rollout_total_loss += loss
+                loss = rollout_total_loss / len(rollout_preds)
+                
+                # _pred = model(_input)
+                # loss_dict = criterion(
+                #     _pred.normalise(surf_stats = _model.surf_stats),
+                #     _label.normalise(surf_stats = _model.surf_stats)
+                # )
+                # loss = loss_dict["all_vars"]
 
             gather_val_loss = accelerator.gather(loss)
             total_val_loss += gather_val_loss.sum().item()

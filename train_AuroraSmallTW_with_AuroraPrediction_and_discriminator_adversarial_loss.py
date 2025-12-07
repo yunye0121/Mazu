@@ -19,12 +19,13 @@ from safetensors.torch import load_file
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
 
-from discriminator.ResNet_discriminator import ResNetDiscriminator
-
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
+from datasets.AuroraTWandERA5TWDatasetforAurora import AuroraTWandERA5TWDatasetforAurora
 
 from utils.metrics import AuroraMAELoss
 from utils.training_scheduler import get_scheduler_with_warmup
+
+from discriminator.ResNet_discriminator import ResNetDiscriminator
 
 from tqdm.auto import tqdm
 import wandb
@@ -79,6 +80,9 @@ def parse_args():
     parser.add_argument("--input_time_window", type = int, required = True)
     parser.add_argument("--rollout_step", type = int, required = True)
 
+    parser.add_argument("--Aurora_input_dir", type = str, default = None)
+    parser.add_argument("--use_Aurora_input_len", type = int, default = 0)
+
     parser.add_argument("--epochs", type = int, default = 5)
     parser.add_argument("--lr", type = float, default = 1e-3)
     parser.add_argument("--weight_decay", type = float, default = 1e-3)
@@ -100,10 +104,7 @@ def parse_args():
 
     return parser.parse_args()
 
-def create_model(
-        args,
-    ):
-
+def create_model(args):
     model = AuroraSmall(
         use_lora = args.use_lora,
         bf16_mode = args.bf16_mode,
@@ -141,38 +142,39 @@ def create_discriminator(args):
 
     return discriminator
 
-
 def create_dataset(args, split):
     if split == "train":
-        ds = ERA5TWDatasetforAurora(
-                data_root_dir = args.data_root_dir,
-                start_date_hour = args.train_start_date_hour,
-                end_date_hour = args.train_end_date_hour,
-                upper_variables = args.upper_variables,
-                surface_variables = args.surface_variables,
-                static_variables = args.static_variables,
-                levels = args.levels,
-                latitude = args.latitude,
-                longitude = args.longitude,
-                lead_time = args.lead_time,
-                input_time_window = args.input_time_window,
-                rollout_step = args.rollout_step,
-            )
+        ds = AuroraTWandERA5TWDatasetforAurora(
+            data_root_dir = args.data_root_dir,
+            start_date_hour = args.train_start_date_hour,
+            end_date_hour = args.train_end_date_hour,
+            upper_variables = args.upper_variables,
+            surface_variables = args.surface_variables,
+            static_variables = args.static_variables,
+            levels = args.levels,
+            latitude = args.latitude,
+            longitude = args.longitude,
+            lead_time = args.lead_time,
+            input_time_window = args.input_time_window,
+            rollout_step = args.rollout_step,
+            Aurora_input_dir = args.Aurora_input_dir,
+            use_Aurora_input_len = args.use_Aurora_input_len,
+        )
     elif split == "val":
         ds = ERA5TWDatasetforAurora(
-                data_root_dir = args.data_root_dir,
-                start_date_hour = args.val_start_date_hour,
-                end_date_hour = args.val_end_date_hour,
-                upper_variables = args.upper_variables,
-                surface_variables = args.surface_variables,
-                static_variables = args.static_variables,
-                levels = args.levels,
-                latitude = args.latitude,
-                longitude = args.longitude,
-                lead_time = args.lead_time,
-                input_time_window = args.input_time_window,
-                rollout_step = args.rollout_step,
-            )
+            data_root_dir = args.data_root_dir,
+            start_date_hour = args.val_start_date_hour,
+            end_date_hour = args.val_end_date_hour,
+            upper_variables = args.upper_variables,
+            surface_variables = args.surface_variables,
+            static_variables = args.static_variables,
+            levels = args.levels,
+            latitude = args.latitude,
+            longitude = args.longitude,
+            lead_time = args.lead_time,
+            input_time_window = args.input_time_window,
+            rollout_step = args.rollout_step,
+        )
     else:
         raise Exception("Do not support this dataset split!")
     return ds
@@ -188,7 +190,7 @@ def save_checkpoint_by_epoch(args, accelerator, output_dir, epoch):
             )
             if args.checkpoints_total_limit is not None and len(checkpoints) >= args.checkpoints_total_limit:
                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                for removing_checkpoint in checkpoints[:num_to_remove]:
+                for removing_checkpoint in checkpoints[: num_to_remove]:
                     shutil.rmtree(removing_checkpoint)
                     logger.info(f"Removed old checkpoint: {removing_checkpoint}")
 
@@ -238,13 +240,11 @@ def train_epoch(
         train_global_step,
     ):
 
-    unwrapped_model = accelerator.unwrap_model(model)
+    _model = accelerator.unwrap_model(model)
 
     model.train()
-    
     total_train_loss = 0.0
     total_train_samples = 0
-
     total_train_adv_loss = 0.0
     total_train_var_loss = 0.0
 
@@ -253,14 +253,13 @@ def train_epoch(
     static_data = dataloader.dataset.get_static_vars_ds()
 
     pbar = tqdm(
-        dataloader, 
-        disable = not accelerator.is_local_main_process, 
+        dataloader,
+        disable = not accelerator.is_local_main_process,
         desc = f"train_epoch: {epoch}",
         # ncols = 120,
     )
 
     for batch in pbar:
-
         train_input, train_label, train_dates = batch
 
         assert next(iter(train_input["surf_vars"].values())).shape[0] == next(iter(train_input["atmos_vars"].values())).shape[0] \
@@ -268,7 +267,6 @@ def train_epoch(
 
         optimizer.zero_grad()
         with accelerator.autocast():
-            
             _input = Batch(
                 surf_vars = train_input["surf_vars"],
                 atmos_vars = train_input["atmos_vars"],
@@ -280,7 +278,6 @@ def train_epoch(
                     atmos_levels = levels,
                 ),
             )
-
             _label = Batch(
                 surf_vars = train_label['surf_vars'],
                 atmos_vars = train_label['atmos_vars'],
@@ -292,17 +289,13 @@ def train_epoch(
                     atmos_levels = levels,
                 ),
             )
-
-            _pred = model(_input)
-
+            _pred = model.forward(_input)
             loss_dict = criterion(
-                _pred.normalise(surf_stats = unwrapped_model.surf_stats),
-                _label.normalise(surf_stats = unwrapped_model.surf_stats),
+                _pred.normalise(surf_stats = _model.surf_stats),
+                _label.normalise(surf_stats = _model.surf_stats),
             )
-            
             # loss = loss_dict["all_vars"]
             var_loss = loss_dict["all_vars"]
-            
             if args.use_adversarial_loss and discriminator is not None:
                 
                 # with torch.no_grad():
@@ -310,10 +303,10 @@ def train_epoch(
                 
                 discriminator_label = torch.ones_like(discriminator_pred)
                 adversarial_loss = adversarial_loss_criterion( discriminator_pred, discriminator_label )
-                print("Adversarial Loss Computation:")
-                print(f"{discriminator_pred=}")
-                print(f"{discriminator_label=}")
-                print(f"{adversarial_loss=}")
+                # print("Adversarial Loss Computation:")
+                # print(f"{discriminator_pred=}")
+                # print(f"{discriminator_label=}")
+                # print(f"{adversarial_loss=}")
                 # print(f"{var_loss.shape=}")
                 # print(f"{discriminator_pred.shape=}")
                 # print(f"{discriminator_label.shape=}")
@@ -343,7 +336,7 @@ def train_epoch(
 
         optimizer.step()
         scheduler.step()
-        gather_train_loss = accelerator.gather( loss )
+        gather_train_loss = accelerator.gather(loss)
 
         total_train_loss += gather_train_loss.sum().item()
         total_train_samples += gather_train_loss.shape[0]
@@ -388,12 +381,11 @@ def train_epoch(
                         "grad_norm": total_grad_norm,
                     },
                 )
-        
+
         train_global_step += 1
-        # print(f"{total_train_loss=}, {total_train_samples=}")
 
     train_epoch_loss = total_train_loss / total_train_samples
-    
+
     if accelerator.is_main_process:
         if args.use_adversarial_loss and discriminator is not None:
             train_epoch_var_loss = total_train_var_loss / total_train_samples
@@ -427,13 +419,11 @@ def val_epoch(
         epoch,
         val_global_step,
     ):
-    unwrapped_model = accelerator.unwrap_model(model)
+    _model = accelerator.unwrap_model(model)
     model.eval()
 
     total_val_loss = 0.0
     total_val_samples = 0
-
-    # for logging var/adv loss when using adversarial loss
     total_val_var_loss = 0.0
     total_val_adv_loss = 0.0
 
@@ -445,12 +435,12 @@ def val_epoch(
         dataloader,
         disable = not accelerator.is_local_main_process,
         desc = f"val_epoch: {epoch}",
+        # ncols = 120,
     )
 
     with torch.inference_mode():
         for batch in pbar:
             val_input, val_label, val_dates = batch
-
             with accelerator.autocast():
                 _input = Batch(
                     surf_vars = val_input["surf_vars"],
@@ -464,8 +454,8 @@ def val_epoch(
                     ),
                 )
                 _label = Batch(
-                    surf_vars = val_label["surf_vars"],
-                    atmos_vars = val_label["atmos_vars"],
+                    surf_vars = val_label['surf_vars'],
+                    atmos_vars = val_label['atmos_vars'],
                     static_vars = static_data["static_vars"],
                     metadata = Metadata(
                         lat = latitude,
@@ -474,17 +464,13 @@ def val_epoch(
                         atmos_levels = levels,
                     ),
                 )
-
-                _pred = model(_input)
-
-                # var loss (same as before)
+                _pred = model.forward(_input)
                 loss_dict = criterion(
-                    _pred.normalise(surf_stats = unwrapped_model.surf_stats),
-                    _label.normalise(surf_stats = unwrapped_model.surf_stats),
+                    _pred.normalise(surf_stats = _model.surf_stats),
+                    _label.normalise(surf_stats = _model.surf_stats)
                 )
+                # loss = loss_dict["all_vars"]
                 var_loss = loss_dict["all_vars"]
-
-                # adversarial part (mirror train_epoch)
                 if (
                     args.use_adversarial_loss
                     and discriminator is not None
@@ -504,12 +490,11 @@ def val_epoch(
                     adversarial_loss = None  # just for clarity
                     loss = var_loss
 
-            # gather main loss
             gather_val_loss = accelerator.gather(loss)
             total_val_loss += gather_val_loss.sum().item()
             total_val_samples += gather_val_loss.shape[0]
-            step_loss = gather_val_loss.mean().item()
 
+            step_loss = gather_val_loss.mean().item()
             # gather and log components when using adversarial loss
             if (
                 args.use_adversarial_loss
@@ -587,10 +572,10 @@ def val_epoch(
 
     return val_epoch_loss, val_global_step
 
-
 def main():
     args = parse_args()
     set_seed(args.seed)
+
     output_dir = Path(args.output_dir)
     logging_dir = output_dir / args.logging_dir
     ckpt_dir = output_dir / "ckpts"
@@ -606,7 +591,7 @@ def main():
         log_with = args.report_to,
         project_config = accelerator_project_config,
     )
-    
+
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
         accelerator.init_trackers(
@@ -614,13 +599,14 @@ def main():
             config = tracker_config,
             init_kwargs = {"wandb": {"name": args.wandb_name}},
         )
-        
+
         if args.report_to == "wandb":
             run = wandb.run
             run.define_metric("train/step_loss", step_metric = "train_global_step")
             run.define_metric("val/step_loss", step_metric = "val_global_step")
             run.define_metric("train/epoch_loss", step_metric = "epoch")
             run.define_metric("val/epoch_loss", step_metric = "epoch")
+            
             if args.use_adversarial_loss:
                 run.define_metric("train/step_var_loss", step_metric = "train_global_step")
                 run.define_metric("train/step_adv_loss", step_metric = "train_global_step")
@@ -632,17 +618,11 @@ def main():
                 run.define_metric("val/epoch_var_loss", step_metric = "epoch")
                 run.define_metric("val/epoch_adv_loss", step_metric = "epoch")
 
-
     logger.info(accelerator.state)
 
     model = create_model(args)
     train_dataset = create_dataset(args, "train")
     val_dataset = create_dataset(args, "val")
-
-    if args.use_adversarial_loss:
-        discriminator = create_discriminator(args)
-    else:
-        discriminator = None
 
     train_loader = DataLoader(
         train_dataset, batch_size = args.train_batch_size, shuffle = True,
@@ -660,6 +640,11 @@ def main():
     )
 
     criterion = AuroraMAELoss
+
+    if args.use_adversarial_loss:
+        discriminator = create_discriminator(args)
+    else:
+        discriminator = None
     if discriminator:
         adversarial_loss_criterion = torch.nn.BCEWithLogitsLoss( reduction = "none" )
     else:
@@ -675,6 +660,10 @@ def main():
         schedule_type = "cosine",
     )
 
+    # model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+    #     model, optimizer, train_loader, val_loader, scheduler,
+    # )
+
     if discriminator:
         model, discriminator, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
             model, discriminator, optimizer, train_loader, val_loader, scheduler,
@@ -683,15 +672,6 @@ def main():
         model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
             model, optimizer, train_loader, val_loader, scheduler,
         )
-
-    # if discriminator:
-    #     disc_unwrapped = accelerator.unwrap_model(discriminator)
-    #     disc_params_before = {
-    #         name: p.detach().cpu().clone()
-    #         for name, p in disc_unwrapped.named_parameters()
-    #     }
-    # else:
-    #     disc_params_before = None
 
     train_global_step = 0
     val_global_step = 0
@@ -720,11 +700,11 @@ def main():
             adversarial_loss_criterion,
             accelerator,
             epoch,
-            val_global_step,
+            val_global_step
         )
 
         accelerator.wait_for_everyone()
-        
+
         if accelerator.is_main_process:
             logger.info(f"epoch {epoch} - train_loss: {train_loss:.8f}")
             logger.info(f"epoch {epoch} - val_loss: {val_loss:.8f}")
@@ -743,24 +723,8 @@ def main():
                 val_loss,
                 best_checkpoints,
             )
-        
+
         accelerator.wait_for_everyone()
-
-    # if discriminator and accelerator.is_main_process:
-    #     disc_unwrapped = accelerator.unwrap_model(discriminator)
-    #     changed_params = []
-    #     for name, p in disc_unwrapped.named_parameters():
-    #         before = disc_params_before[name]
-    #         after = p.detach().cpu()
-    #         if not torch.allclose(before, after):
-    #             changed_params.append(name)
-
-    #     if not changed_params:
-    #         logger.info("Discriminator parameters did NOT change. ✅")
-    #     else:
-    #         logger.warning("Discriminator parameters CHANGED for these tensors:")
-    #         for name in changed_params:
-    #             logger.warning(f"  - {name}")
 
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
