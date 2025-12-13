@@ -74,6 +74,10 @@ def parse_args():
         ],
     )
 
+    parser.add_argument("--freeze_encoder", action = "store_true")
+    parser.add_argument("--freeze_backbone", action = "store_true")
+    parser.add_argument("--freeze_decoder", action = "store_true")
+
     parser.add_argument("--upper_variables", type = str, nargs = "+", required = True)
     parser.add_argument("--surface_variables", type = str, nargs = "+", required = True)
     parser.add_argument("--static_variables", type = str, nargs = "+", required = True)
@@ -123,6 +127,27 @@ def create_model(
         logger.info(f"Loading checkpoint: {args.checkpoint_path}")
         state_dict = load_file(args.checkpoint_path)
         model.load_state_dict(state_dict, strict = False)
+
+    # 1. Freeze the Encoder (The "Sensor")
+    if args.freeze_encoder:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+    
+
+    # 2. Freeze the Backbone (The "Physics")
+    if args.freeze_backbone:
+        for param in model.backbone.parameters():
+            param.requires_grad = False
+
+    # 3. Ensure Decoder is Trainable (The "Generator")
+    if args.freeze_decoder:
+        for param in model.decoder.parameters():
+            param.requires_grad = False
+
+    # 4. Optional: Log parameter counts to verify
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Trainable Parameters: {trainable_params:,} / {total_params:,} ({(trainable_params/total_params):.2%})")
     return model
 
 class FeatureExtractor(torch.nn.Module):
