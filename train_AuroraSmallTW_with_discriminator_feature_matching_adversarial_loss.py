@@ -68,6 +68,11 @@ def parse_args():
         type = str,
         default = None,
     )
+    parser.add_argument(
+        "--target_layers", type = str, nargs = "+", default = [
+            "backbone.layer1", "backbone.layer2", "backbone.layer3", "backbone.layer4",
+        ],
+    )
 
     parser.add_argument("--upper_variables", type = str, nargs = "+", required = True)
     parser.add_argument("--surface_variables", type = str, nargs = "+", required = True)
@@ -125,7 +130,9 @@ class FeatureExtractor(torch.nn.Module):
         super().__init__()
         self.model = model
         self.target_layers = target_layers
-        self._features = {layer: torch.empty(0) for layer in target_layers}
+        self._features = {
+            layer: torch.empty(0) for layer in target_layers
+        }
         
         # Register hooks
         for name, module in self.model.named_modules():
@@ -153,9 +160,9 @@ def create_discriminator(args):
         pretrained = False,
     )
 
-    print("Discriminator Model:")
-    for name, module in discriminator.named_modules():
-        print(name) # Look for "layer2", "layer3", etc.
+    # print("Discriminator Model:")
+    # for name, module in discriminator.named_modules():
+    #     print(name) # Look for "layer2", "layer3", etc.
 
     if args.discriminator_checkpoint_path is not None:
         logger.info(f"Loading discriminator checkpoint from {args.discriminator_checkpoint_path}")
@@ -168,7 +175,7 @@ def create_discriminator(args):
     discriminator.eval()
 
     # return discriminator
-    target_layers = ["backbone.layer3", "backbone.layer4"]
+    target_layers = args.target_layers
     feature_discriminator = FeatureExtractor(discriminator, target_layers)
     
     return feature_discriminator
@@ -367,7 +374,7 @@ def train_epoch(
                 # Scale the loss (optional normalization by number of layers)
                 feature_matching_loss = feature_matching_loss / len(fake_features_dict)
 
-                print(f"Feature Matching Loss: {feature_matching_loss.item()}")
+                # print(f"Feature Matching Loss: {feature_matching_loss.item()}")
 
                 loss = (1 - args.fm_lambda) * var_loss + args.fm_lambda * feature_matching_loss
                 # print(f"{loss.shape=}")
