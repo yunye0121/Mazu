@@ -74,6 +74,36 @@ def parse_args():
         ],
     )
 
+    parser.add_argument(
+        "--discriminator_refresh_epochs",
+        type=int,
+        default=5,
+        help="Train new discriminator every N epochs (0 to disable refresh)",
+    )
+    parser.add_argument(
+        "--discriminator_train_epochs",
+        type=int,
+        default=3,
+        help="Number of epochs to train each new discriminator",
+    )
+    parser.add_argument(
+        "--discriminator_lr",
+        type=float,
+        default=1e-4,
+        help="Learning rate for training new discriminators",
+    )
+    parser.add_argument(
+        "--discriminator_batch_size",
+        type=int,
+        default=32,
+        help="Batch size for training discriminators",
+    )
+    parser.add_argument(
+        "--discriminator_shuffle_samples",
+        action="store_true",
+        help="Shuffle real/fake sample order during discriminator training to prevent position bias",
+    )
+
     parser.add_argument("--freeze_encoder", action = "store_true")
     parser.add_argument("--freeze_backbone", action = "store_true")
     parser.add_argument("--freeze_decoder", action = "store_true")
@@ -203,6 +233,8 @@ def create_discriminator(args):
     target_layers = args.target_layers
     feature_discriminator = FeatureExtractor(discriminator, target_layers)
     
+    feature_discriminator.eval()
+
     return feature_discriminator
 
 
@@ -288,6 +320,337 @@ def save_checkpoint_best_by_val_loss(
 
     return best_ckpts
 
+def concatenate_batches(batch1, batch2):
+    """
+    Concatenate two Aurora Batch objects along the batch dimension.
+    This allows single forward pass through discriminator to avoid BatchNorm issues.
+    
+    Args:
+        batch1: First Aurora Batch (e.g., real data)
+        batch2: Second Aurora Batch (e.g., fake data)
+    
+    Returns:
+        Combined Aurora Batch with doubled batch size
+    """
+    from aurora import Batch, Metadata
+    
+    # Concatenate surface variables
+    combined_surf_vars = {}
+    for key in batch1.surf_vars.keys():
+        combined_surf_vars[key] = torch.cat([batch1.surf_vars[key], batch2.surf_vars[key]], dim=0)
+    
+    # Concatenate atmospheric variables
+    combined_atmos_vars = {}
+    for key in batch1.atmos_vars.keys():
+        combined_atmos_vars[key] = torch.cat([batch1.atmos_vars[key], batch2.atmos_vars[key]], dim=0)
+    
+    # Concatenate static variables
+    # combined_static_vars = {}
+    # for key in batch1.static_vars.keys():
+    #     combined_static_vars[key] = torch.cat([batch1.static_vars[key], batch2.static_vars[key]], dim=0)
+    
+    combined_static_vars = batch1.static_vars  # Assume static vars are the same for both batches
+
+    # Combine metadata (concatenate time tuples)
+    # combined_metadata = Metadata(
+    #     lat=batch1.metadata.lat,  # Same for both
+    #     lon=batch1.metadata.lon,  # Same for both
+    #     time=batch1.metadata.time + batch2.metadata.time,  # Concatenate tuples
+    #     atmos_levels=batch1.metadata.atmos_levels,  # Same for both
+    # )
+    combined_metadata = batch1.metadata  # Keep metadata from the first batch (assumed same for both)
+
+    return Batch(
+        surf_vars=combined_surf_vars,
+        atmos_vars=combined_atmos_vars,
+        static_vars=combined_static_vars,
+        metadata=combined_metadata,
+    )
+
+def train_new_discriminator(
+    model,
+    train_loader,
+    val_loader,
+    args,
+    accelerator,
+    disc_generation,
+):
+    """
+    Train a fresh discriminator to distinguish real data from current model outputs.
+    
+    Args:
+        model: Current Aurora model (frozen during this phase)
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        args: Training arguments
+        accelerator: Accelerator instance
+        disc_generation: Current discriminator generation number
+    
+    Returns:
+        Trained and frozen discriminator wrapped in FeatureExtractor
+    """
+    logger.info(f"=" * 80)
+    logger.info(f"Training new discriminator (Generation {disc_generation})")
+    logger.info(f"=" * 80)
+    
+    # Create fresh discriminator
+    new_discriminator = ResNetDiscriminator(
+        surface_variables = args.surface_variables,
+        upper_variables = args.upper_variables,
+        levels = args.levels,
+        backbone_name = "resnet50",
+        pretrained = False,
+    )
+    
+    # Make it trainable
+    for p in new_discriminator.parameters():
+        p.requires_grad = True
+    
+    # Setup optimizer
+    disc_optimizer = AdamW(
+        new_discriminator.parameters(),
+        lr = args.discriminator_lr,
+        weight_decay = args.weight_decay,
+    )
+    
+    # Prepare with accelerator
+    new_discriminator, disc_optimizer = accelerator.prepare(
+        new_discriminator, disc_optimizer,
+    )
+    
+    # Freeze the generator model during discriminator training
+    unwrapped_model = accelerator.unwrap_model(model)
+    model.eval()
+    
+    # Get dataset info
+    latitude, longitude = train_loader.dataset.get_latitude_longitude()
+    levels = train_loader.dataset.get_levels()
+    static_data = train_loader.dataset.get_static_vars_ds()
+    
+
+    # Train discriminator for specified epochs
+    for disc_epoch in range(1, args.discriminator_train_epochs + 1):
+        new_discriminator.train()
+        total_disc_loss = 0.0
+        total_samples = 0
+
+        all_probs = []
+        all_labels = []
+        
+        pbar = tqdm(
+            train_loader,
+            disable = not accelerator.is_local_main_process,
+            desc = f"Disc Gen {disc_generation} - Epoch {disc_epoch} / {args.discriminator_train_epochs}",
+        )
+        
+        for batch in pbar:
+            train_input, train_label, train_dates = batch
+            
+            disc_optimizer.zero_grad()
+            
+            with accelerator.autocast():
+                # Prepare batches
+                _input = Batch(
+                    surf_vars=train_input["surf_vars"],
+                    atmos_vars=train_input["atmos_vars"],
+                    static_vars=static_data["static_vars"],
+                    metadata=Metadata(
+                        lat=latitude,
+                        lon=longitude,
+                        time=tuple(map(lambda d: pd.Timestamp(d), train_dates)),
+                        atmos_levels=levels,
+                    ),
+                )
+                
+                _label = Batch(
+                    surf_vars=train_label['surf_vars'],
+                    atmos_vars=train_label['atmos_vars'],
+                    static_vars=static_data["static_vars"],
+                    metadata=Metadata(
+                        lat=latitude,
+                        lon=longitude,
+                        time=tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours=args.lead_time), train_dates)),
+                        atmos_levels=levels,
+                    ),
+                )
+                
+                # Generate fake data (detached from model)
+                with torch.no_grad():
+                    _pred = model(_input)
+                
+                # print("_label and _pred shapes:")
+                # print(f"_label.surf_vars.2t.shape: {_label.surf_vars['2t'].shape}")
+                # print(f"_pred.surf_vars.2t.shape: {_pred.surf_vars['2t'].shape}")
+                # print(f"_label.atmos_vars.u.shape: {_label.atmos_vars['u'].shape}")
+                # print(f"_pred.atmos_vars.u.shape: {_pred.atmos_vars['u'].shape}")
+
+                # Discriminator predictions
+                # real_score = new_discriminator(_label).view(-1)
+                # fake_score = new_discriminator(_pred).view(-1)
+                original_batch_size = next(iter(_label.surf_vars.values())).shape[0]
+                combined_batch = concatenate_batches(_label, _pred)
+                combined_scores = new_discriminator(combined_batch).view(-1)
+
+                # print(f"{original_batch_size=}")
+
+                # batch_size = combined_scores.shape[0] // 2
+                combined_labels = torch.cat([
+                    torch.ones(original_batch_size, device=combined_scores.device),
+                    torch.zeros(original_batch_size, device=combined_scores.device),
+                ])
+                
+                if args.discriminator_shuffle_samples:
+                    perm = torch.randperm(combined_scores.shape[0], device = combined_scores.device)
+                    combined_scores = combined_scores[perm]
+                    combined_labels = combined_labels[perm]
+
+                # Single BCE loss computation
+                disc_criterion = torch.nn.BCEWithLogitsLoss(reduction = "mean")
+                disc_loss = disc_criterion(
+                    combined_scores, combined_labels,
+                )
+
+                # print(f"{real_score.shape=}, {fake_score.shape=}")
+                
+                # # Binary cross-entropy loss
+                # # Real data should be classified as 1, fake as 0
+                # real_labels = torch.ones_like(real_score)
+                # fake_labels = torch.zeros_like(fake_score)
+                
+                # real_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                #     real_score, real_labels
+                # )
+                # fake_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                #     fake_score, fake_labels
+                # )
+                
+                # disc_loss = (real_loss + fake_loss) / 2
+            
+            accelerator.backward(disc_loss)
+            accelerator.clip_grad_norm_(new_discriminator.parameters(), args.max_grad_norm)
+            disc_optimizer.step()
+            
+            # Logging
+            gather_disc_loss = accelerator.gather(disc_loss)
+            total_disc_loss += gather_disc_loss.sum().item()
+            total_samples += gather_disc_loss.shape[0]
+            
+            # Calculate accuracies for monitoring
+            # Apply sigmoid to convert logits to probabilities
+            combined_probs = torch.sigmoid(combined_scores)
+            gather_probs = accelerator.gather(combined_probs)
+            gather_labels = accelerator.gather(combined_labels)
+            all_probs.append(gather_probs.cpu())
+            all_labels.append(gather_labels.cpu())
+            
+            if accelerator.is_main_process:
+                
+                # gather_batch_size = gather_probs.shape[0] // 2
+                
+                # with torch.no_grad():
+                #     real_probs = gather_probs[: gather_batch_size]
+                #     fake_probs = gather_probs[gather_batch_size :]
+                    # Real samples should have prob > 0.5 (close to 1)
+                    # Fake samples should have prob < 0.5 (close to 0)
+                    # real_acc = (real_probs > 0.5).float().mean().item()
+                    # fake_acc = (fake_probs < 0.5).float().mean().item()
+                
+                pbar.set_postfix({
+                    "disc_loss": f"{gather_disc_loss.mean().item():.6f}",
+                    # "real_acc": f"{real_acc:.3f}",
+                    # "fake_acc": f"{fake_acc:.3f}",
+                })
+            # if accelerator.is_main_process:
+            #     # Calculate accuracies for monitoring
+            #     with torch.no_grad():
+            #         real_scores = combined_scores[:batch_size]
+            #         fake_scores = combined_scores[batch_size:]
+            #         real_acc = (real_scores > 0).float().mean().item()
+            #         fake_acc = (fake_scores < 0).float().mean().item()
+                
+            #     pbar.set_postfix({
+            #         "disc_loss": f"{gather_disc_loss.mean().item():.6f}",
+            #         "real_acc": f"{real_acc:.3f}",
+            #         "fake_acc": f"{fake_acc:.3f}",
+            #     })
+            # if accelerator.is_main_process:
+            #     pbar.set_postfix({
+            #         "disc_loss": f"{gather_disc_loss.mean().item():.6f}",
+            #         "real_acc": f"{(real_score > 0).float().mean().item():.3f}",
+            #         "fake_acc": f"{(fake_score < 0).float().mean().item():.3f}",
+            #     })
+        
+        epoch_disc_loss = total_disc_loss / total_samples
+        
+        if accelerator.is_main_process:
+            # Concatenate all predictions and labels from the epoch
+            all_probs = torch.cat(all_probs)
+            all_labels = torch.cat(all_labels)
+            
+            # Binarize predictions (threshold = 0.5)
+            pred_labels = (all_probs >= 0.5).long()
+            true_labels = all_labels.long()
+            
+            # Calculate metrics using sklearn (like your reference code)
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+            
+            epoch_acc = accuracy_score(true_labels, pred_labels)
+            epoch_precision = precision_score(true_labels, pred_labels, zero_division=0)
+            epoch_recall = recall_score(true_labels, pred_labels, zero_division=0)
+            epoch_f1 = f1_score(true_labels, pred_labels, zero_division=0)
+            
+            logger.info(
+                f"Disc Gen {disc_generation} Epoch {disc_epoch}: "
+                f"loss={epoch_disc_loss:.6f}, "
+                f"acc={epoch_acc:.4f}, "
+                f"precision={epoch_precision:.4f}, "
+                f"recall={epoch_recall:.4f}, "
+                f"f1={epoch_f1:.4f}"
+            )
+            
+            accelerator.log({
+                "discriminator_training/epoch": disc_epoch,
+                "discriminator_training/loss": epoch_disc_loss,
+                "discriminator_training/accuracy": epoch_acc,
+                "discriminator_training/precision": epoch_precision,
+                "discriminator_training/recall": epoch_recall,
+                "discriminator_training/f1": epoch_f1,
+                "discriminator_training/generation": disc_generation,
+            })
+
+        # if accelerator.is_main_process:
+        #     logger.info(f"Disc Gen {disc_generation} Epoch {disc_epoch}: loss={epoch_disc_loss:.6f}")
+        #     accelerator.log({
+        #         "discriminator_training/epoch": disc_epoch,
+        #         "discriminator_training/loss": epoch_disc_loss,
+        #         "discriminator_training/generation": disc_generation,
+        #     })
+    
+    # Freeze discriminator after training
+    for p in new_discriminator.parameters():
+        p.requires_grad = False
+    new_discriminator.eval()
+    
+    # Wrap in FeatureExtractor
+    unwrapped_discriminator = accelerator.unwrap_model(new_discriminator)
+    feature_discriminator = FeatureExtractor(unwrapped_discriminator, args.target_layers)
+    feature_discriminator.eval()
+    
+    # Save discriminator checkpoint
+    if accelerator.is_main_process:
+        disc_save_path = Path(args.output_dir) / "discriminators" / f"disc_gen_{disc_generation}.safetensors"
+        disc_save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        from safetensors.torch import save_file
+        save_file(unwrapped_discriminator.state_dict(), disc_save_path)
+        logger.info(f"Saved discriminator generation {disc_generation} to {disc_save_path}")
+    
+    logger.info(f"Finished training discriminator generation {disc_generation}")
+    logger.info(f"=" * 80)
+    
+    return feature_discriminator
+
+
 def train_epoch(
         args,
         model,
@@ -368,7 +731,7 @@ def train_epoch(
             var_loss = loss_dict["all_vars"]
             
             if args.use_feature_matching_loss and discriminator is not None:
-                
+                feature_matching_loss = 0.0
                 # with torch.no_grad():
                 # discriminator_pred = discriminator(_pred).view(-1)
                 # discriminator_label = torch.ones_like(discriminator_pred)
@@ -391,7 +754,7 @@ def train_epoch(
                     
                     # L1 Loss is usually better for sharpness than MSE (L2)
                     # feature_matching_loss += torch.nn.functional.l1_loss(feat_fake, feat_real)
-                    feature_matching_loss = feature_matching_loss_criterion(
+                    feature_matching_loss += feature_matching_loss_criterion(
                         feat_fake,
                         feat_real,
                     )
@@ -737,9 +1100,20 @@ def main():
     val_dataset = create_dataset(args, "val")
 
     if args.use_feature_matching_loss:
-        discriminator = create_discriminator(args)
+        if args.discriminator_checkpoint_path:
+            # Start with provided checkpoint
+            logger.info("Using initial discriminator checkpoint")
+            discriminator = create_discriminator(args)
+            # current_disc_generation = 0
+        else:
+            # Train initial discriminator from scratch
+            logger.info("Training initial discriminator (Generation 0)")
+            discriminator = None  # Will be created in train_new_discriminator
+            # current_disc_generation = 0
     else:
         discriminator = None
+    
+    current_disc_generation = 1
 
     train_loader = DataLoader(
         train_dataset, batch_size = args.train_batch_size, shuffle = True,
@@ -757,11 +1131,13 @@ def main():
     )
 
     criterion = AuroraMAELoss
-    if discriminator:
-        # feature_matching_loss_criterion = torch.nn.BCEWithLogitsLoss( reduction = "none" )
-        feature_matching_loss_criterion = torch.nn.L1Loss( reduction = "mean" )
-    else:
-        feature_matching_loss_criterion = None
+    # if discriminator:
+    #     # feature_matching_loss_criterion = torch.nn.BCEWithLogitsLoss( reduction = "none" )
+    #     feature_matching_loss_criterion = torch.nn.L1Loss( reduction = "mean" )
+    # else:
+    #     feature_matching_loss_criterion = None
+
+    feature_matching_loss_criterion = torch.nn.L1Loss( reduction = "mean" )
 
     total_training_steps = args.epochs * len(train_loader)
     warmup_steps = int(args.warmup_step_ratio * total_training_steps)
@@ -796,6 +1172,35 @@ def main():
     best_checkpoints = []
 
     for epoch in range(1, args.epochs + 1):
+
+        # Check if we need to refresh discriminator
+        if (
+            args.use_feature_matching_loss
+            and args.discriminator_refresh_epochs > 0
+            and (epoch - 1) % args.discriminator_refresh_epochs == 0
+        ):
+            
+            if discriminator is None or epoch > 1:  # Skip at epoch 1 if we have initial disc
+                logger.info(f"\n{'='*80}")
+                logger.info(f"Epoch {epoch}: Time to refresh discriminator!")
+                logger.info(f"{'='*80}\n")
+                
+                # Train new discriminator
+                discriminator = train_new_discriminator(
+                    model=model,
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    args=args,
+                    accelerator=accelerator,
+                    disc_generation=current_disc_generation,
+                )
+                
+                # Prepare new discriminator
+                discriminator = accelerator.prepare(discriminator)
+                current_disc_generation += 1
+                
+                logger.info(f"Now using discriminator generation {current_disc_generation - 1}")
+
         train_loss, train_global_step = train_epoch(
             args,
             model,
@@ -826,6 +1231,7 @@ def main():
         if accelerator.is_main_process:
             logger.info(f"epoch {epoch} - train_loss: {train_loss:.8f}")
             logger.info(f"epoch {epoch} - val_loss: {val_loss:.8f}")
+            logger.info(f"epoch {epoch} - using discriminator generation: {current_disc_generation if discriminator else 'None'}")
             save_checkpoint_by_epoch(
                 args,
                 accelerator,
