@@ -104,22 +104,22 @@ def prepare_each_lead_time_agg(
     elif err_type == "MAE":
         aggregator = MAEAggregator
 
-    max_lead_time = rollout_step * lead_time
-
+    # max_lead_time = rollout_step * lead_time
     # for t in range(1, max_lead_time + 1):
-    for t in range(0, max_lead_time, lead_time):
-        agg[t + 1] = {'surf_vars': {}, 'atmos_vars': {}}
+    for rs in range(1, rollout_step + 1):
+        t = rs * lead_time
+        agg[t] = {'surf_vars': {}, 'atmos_vars': {}}
         for var in surface_variables:
             _var = var_name_mapping[var] if var in var_name_mapping else var
-            agg[t + 1]['surf_vars'][_var] = aggregator(
+            agg[t]['surf_vars'][_var] = aggregator(
                 error_sum = 0.0,
                 count = 0,
             )
         for var in upper_variables:
             _var = var_name_mapping[var] if var in var_name_mapping else var
-            agg[t + 1]['atmos_vars'][_var] = {}
+            agg[t]['atmos_vars'][_var] = {}
             for lev in levels:
-                agg[t + 1]['atmos_vars'][_var][lev] = aggregator(
+                agg[t]['atmos_vars'][_var][lev] = aggregator(
                     error_sum = 0.0,
                     count = 0,
                 )
