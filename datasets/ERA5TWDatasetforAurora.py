@@ -133,7 +133,8 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
             for i in range(self.input_time_window)
         ]
         date_hour_outputs = [
-            date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time + i) \
+            # date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time + i) \
+            date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time * (i + 1)) \
             for i in range(self.rollout_step)
         ]
 

@@ -528,8 +528,8 @@ if __name__ == "__main__":
     # from AuroraTWandERA5TWDatasetforAurora import AuroraTWandERA5TWDatasetforAurora
 
     data_root_dir = '/work/yunye0121/era5_tw'
-    start_date_hour = '2013-01-01 01:00:00'
-    end_date_hour = '2013-01-01 03:00:00'
+    start_date_hour = '2023-01-01 01:00:00'
+    end_date_hour = '2023-01-01 04:00:00'
     upper_variables = ['u', 'v', 't', 'q', 'z']
     surface_variables = ['t2m', "u10", "v10", "msl"]
     static_variables = ['z', 'lsm', 'slt']
@@ -540,7 +540,7 @@ if __name__ == "__main__":
     input_time_window = 1
     rollout_step = 0
 
-    Aurora_input_dir = "/work/yunye0121/Mazu-adversarial_training_results/Mazu-adversarial-epochs=10-traindt=201301-valdt=202201-intw=2-rs=1-sd=1126-lr=3e-5-bs=8-advlambda=0.05/ckpts/10-train_loss=0.01861313-val_loss=0.02033605/ar_96hrs-intw=2-dt=201301/preds"
+    Aurora_input_dir = "/work/yunye0121/AuroraTW_ckpts/392-train_loss=0.022402-val_loss=0.025010/ar_96hrs_202301_result"
     forecast_hour = 1
     # use_Aurora_input_len = 1
 
@@ -959,101 +959,112 @@ if __name__ == "__main__":
     run_structure_check(discriminator_ds, idx_aurora=1)
     run_structure_check(discriminator_ds, idx_aurora=2)
 
-    # ============================================================
-    # 2) Same-domain ERA5 vs ERA5 using SameDomainDiscriminatorDataset
-    # ============================================================
-    print("\n==================== ERA5 vs ERA5 (SameDomainDiscriminatorDataset) ====================")
-    same_era5_ds = SameDomainDiscriminatorDataset(
-        dataset_group0=era5_ds,   # label 0
-        dataset_group1=era5_ds,   # label 1
-    )
 
-    print(f"len(same_era5_ds)={len(same_era5_ds)}")
-    print("\nFirst few samples from same_era5_ds:")
-    for i in range(min(6, len(same_era5_ds))):
-        (x, dt_str), label = same_era5_ds[i]
-        print(f"\nSameDomain ERA5 sample[{i}]:")
-        print(f"  datetime: {dt_str}")
-        print(f"  label:    {label}")
-        print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
-        print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
 
-    # Reuse analyzer (label names inside are just text)
-    stats_same_era5 = analyze_discriminator_dataset(
-        same_era5_ds,
-        max_samples_per_label=3,
-        do_plots=False,
-    )
 
-    # ============================================================
-    # 3) Same-domain Aurora vs Aurora using SameDomainDiscriminatorDataset
-    # ============================================================
-    print("\n==================== Aurora vs Aurora (SameDomainDiscriminatorDataset) ====================")
-    same_aurora_ds = SameDomainDiscriminatorDataset(
-        dataset_group0=aurora_ds,  # label 0
-        dataset_group1=aurora_ds,  # label 1
-    )
 
-    print(f"len(same_aurora_ds)={len(same_aurora_ds)}")
-    print("\nFirst few samples from same_aurora_ds:")
-    for i in range(min(6, len(same_aurora_ds))):
-        (x, dt_str), label = same_aurora_ds[i]
-        print(f"\nSameDomain Aurora sample[{i}]:")
-        print(f"  datetime: {dt_str}")
-        print(f"  label:    {label}")
-        print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
-        print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
 
-    stats_same_aurora = analyze_discriminator_dataset(
-        same_aurora_ds,
-        max_samples_per_label=3,
-        do_plots=False,
-    )
 
-    # ============================================================
-    # 4) Odd/Even ERA5 using OddEvenSameSourceDiscriminatorDataset
-    # ============================================================
-    print("\n==================== ERA5 odd/even (OddEvenSameSourceDiscriminatorDataset) ====================")
-    odd_even_era5_ds = OddEvenSameSourceDiscriminatorDataset(base_datasets=era5_ds)
 
-    print(f"len(odd_even_era5_ds)={len(odd_even_era5_ds)}")
-    print("\nFirst few samples from odd_even_era5_ds:")
-    for i in range(min(6, len(odd_even_era5_ds))):
-        (x, dt_str), label = odd_even_era5_ds[i]
-        print(f"\nOddEven ERA5 sample[{i}]:")
-        print(f"  datetime: {dt_str}")
-        print(f"  label (0=even,1=odd): {label}")
-        print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
-        print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
 
-    stats_odd_even_era5 = analyze_discriminator_dataset(
-        odd_even_era5_ds,
-        max_samples_per_label=3,
-        do_plots=False,
-    )
 
-    # ============================================================
-    # 5) Odd/Even Aurora using OddEvenSameSourceDiscriminatorDataset
-    # ============================================================
-    print("\n==================== Aurora odd/even (OddEvenSameSourceDiscriminatorDataset) ====================")
-    odd_even_aurora_ds = OddEvenSameSourceDiscriminatorDataset(base_datasets=aurora_ds)
 
-    print(f"len(odd_even_aurora_ds)={len(odd_even_aurora_ds)}")
-    print("\nFirst few samples from odd_even_aurora_ds:")
-    for i in range(min(6, len(odd_even_aurora_ds))):
-        (x, dt_str), label = odd_even_aurora_ds[i]
-        print(f"\nOddEven Aurora sample[{i}]:")
-        print(f"  datetime: {dt_str}")
-        print(f"  label (0=even,1=odd): {label}")
-        print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
-        print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
 
-    stats_odd_even_aurora = analyze_discriminator_dataset(
-        odd_even_aurora_ds,
-        max_samples_per_label=3,
-        do_plots=False,
-    )
-    print("\nTest complete. You are ready to train your model using this paired dataset!")
+    # # ============================================================
+    # # 2) Same-domain ERA5 vs ERA5 using SameDomainDiscriminatorDataset
+    # # ============================================================
+    # print("\n==================== ERA5 vs ERA5 (SameDomainDiscriminatorDataset) ====================")
+    # same_era5_ds = SameDomainDiscriminatorDataset(
+    #     dataset_group0=era5_ds,   # label 0
+    #     dataset_group1=era5_ds,   # label 1
+    # )
+
+    # print(f"len(same_era5_ds)={len(same_era5_ds)}")
+    # print("\nFirst few samples from same_era5_ds:")
+    # for i in range(min(6, len(same_era5_ds))):
+    #     (x, dt_str), label = same_era5_ds[i]
+    #     print(f"\nSameDomain ERA5 sample[{i}]:")
+    #     print(f"  datetime: {dt_str}")
+    #     print(f"  label:    {label}")
+    #     print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
+    #     print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
+
+    # # Reuse analyzer (label names inside are just text)
+    # stats_same_era5 = analyze_discriminator_dataset(
+    #     same_era5_ds,
+    #     max_samples_per_label=3,
+    #     do_plots=False,
+    # )
+
+    # # ============================================================
+    # # 3) Same-domain Aurora vs Aurora using SameDomainDiscriminatorDataset
+    # # ============================================================
+    # print("\n==================== Aurora vs Aurora (SameDomainDiscriminatorDataset) ====================")
+    # same_aurora_ds = SameDomainDiscriminatorDataset(
+    #     dataset_group0=aurora_ds,  # label 0
+    #     dataset_group1=aurora_ds,  # label 1
+    # )
+
+    # print(f"len(same_aurora_ds)={len(same_aurora_ds)}")
+    # print("\nFirst few samples from same_aurora_ds:")
+    # for i in range(min(6, len(same_aurora_ds))):
+    #     (x, dt_str), label = same_aurora_ds[i]
+    #     print(f"\nSameDomain Aurora sample[{i}]:")
+    #     print(f"  datetime: {dt_str}")
+    #     print(f"  label:    {label}")
+    #     print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
+    #     print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
+
+    # stats_same_aurora = analyze_discriminator_dataset(
+    #     same_aurora_ds,
+    #     max_samples_per_label=3,
+    #     do_plots=False,
+    # )
+
+    # # ============================================================
+    # # 4) Odd/Even ERA5 using OddEvenSameSourceDiscriminatorDataset
+    # # ============================================================
+    # print("\n==================== ERA5 odd/even (OddEvenSameSourceDiscriminatorDataset) ====================")
+    # odd_even_era5_ds = OddEvenSameSourceDiscriminatorDataset(base_datasets=era5_ds)
+
+    # print(f"len(odd_even_era5_ds)={len(odd_even_era5_ds)}")
+    # print("\nFirst few samples from odd_even_era5_ds:")
+    # for i in range(min(6, len(odd_even_era5_ds))):
+    #     (x, dt_str), label = odd_even_era5_ds[i]
+    #     print(f"\nOddEven ERA5 sample[{i}]:")
+    #     print(f"  datetime: {dt_str}")
+    #     print(f"  label (0=even,1=odd): {label}")
+    #     print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
+    #     print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
+
+    # stats_odd_even_era5 = analyze_discriminator_dataset(
+    #     odd_even_era5_ds,
+    #     max_samples_per_label=3,
+    #     do_plots=False,
+    # )
+
+    # # ============================================================
+    # # 5) Odd/Even Aurora using OddEvenSameSourceDiscriminatorDataset
+    # # ============================================================
+    # print("\n==================== Aurora odd/even (OddEvenSameSourceDiscriminatorDataset) ====================")
+    # odd_even_aurora_ds = OddEvenSameSourceDiscriminatorDataset(base_datasets=aurora_ds)
+
+    # print(f"len(odd_even_aurora_ds)={len(odd_even_aurora_ds)}")
+    # print("\nFirst few samples from odd_even_aurora_ds:")
+    # for i in range(min(6, len(odd_even_aurora_ds))):
+    #     (x, dt_str), label = odd_even_aurora_ds[i]
+    #     print(f"\nOddEven Aurora sample[{i}]:")
+    #     print(f"  datetime: {dt_str}")
+    #     print(f"  label (0=even,1=odd): {label}")
+    #     print(f"  surf_vars['2t'] shape: {x['surf_vars']['2t'].shape}")
+    #     print(f"  atmos_vars['u'] shape: {x['atmos_vars']['u'].shape}")
+
+    # stats_odd_even_aurora = analyze_discriminator_dataset(
+    #     odd_even_aurora_ds,
+    #     max_samples_per_label=3,
+    #     do_plots=False,
+    # )
+    # print("\nTest complete. You are ready to train your model using this paired dataset!")
 
 
 
