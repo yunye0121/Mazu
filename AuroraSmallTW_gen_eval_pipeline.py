@@ -266,7 +266,8 @@ def export_agg_to_csv(
     ):
 
     lead_times = sorted(lead_time_err_agg.keys())
-    lead_time_labels = [f"{t + args.lead_time - 1}h" for t in lead_times]
+    # lead_time_labels = [f"{t + args.lead_time - 1}h" for t in lead_times]
+    lead_time_labels = [f"{t}h" for t in lead_times]
 
     surf_vars = set()
     atmos_vars_levels = dict()
