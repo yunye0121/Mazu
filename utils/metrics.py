@@ -84,7 +84,8 @@ class MAEAggregator:
         return self.error_sum / self.count
 
 def prepare_each_lead_time_agg(
-    max_lead_time: int,
+    rollout_step: int,
+    lead_time: int,
     surface_variables: list,
     upper_variables: list,
     levels: list,
@@ -103,7 +104,10 @@ def prepare_each_lead_time_agg(
     elif err_type == "MAE":
         aggregator = MAEAggregator
 
-    for t in range(1, max_lead_time + 1):
+    max_lead_time = rollout_step * lead_time
+
+    # for t in range(1, max_lead_time + 1):
+    for t in range(1, max_lead_time + 1, lead_time):
         agg[t] = {'surf_vars': {}, 'atmos_vars': {}}
         for var in surface_variables:
             _var = var_name_mapping[var] if var in var_name_mapping else var

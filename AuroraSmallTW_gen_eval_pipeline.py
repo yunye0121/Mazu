@@ -332,7 +332,9 @@ def main():
 
         err_agg_list.append(
             prepare_each_lead_time_agg(
-                max_lead_time = args.rollout_step,
+                rollout_step = args.rollout_step,
+                lead_time = args.lead_time,
+                # max_lead_time = args.rollout_step,
                 surface_variables = args.surface_variables,
                 upper_variables = args.upper_variables,
                 levels = args.levels,
