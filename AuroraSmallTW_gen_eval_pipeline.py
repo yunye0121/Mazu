@@ -172,9 +172,7 @@ def AuroraBatch_2_nc_files(
         ds = xr.Dataset(data_vars, coords = coords)
         rs = int(batch.metadata.rollout_step)
         # output_file_name = f"{(batch.metadata.time[i] - pd.Timedelta(hours = hours + args.lead_time - 1)).strftime('%Y%m%d_%H%M%S')}+{hours + args.lead_time - 1}hr.nc"
-        output_file_name = f"{
-            (batch.metadata.time[i] - pd.Timedelta(hours = rs * args.lead_time)).strftime('%Y%m%d_%H%M%S')
-        }+{rs * args.lead_time}hr.nc"
+        output_file_name = f"{(batch.metadata.time[i] - pd.Timedelta(hours = rs * args.lead_time)).strftime('%Y%m%d_%H%M%S')}+{rs * args.lead_time}hr.nc"
         
         gen_result_folder = Path(args.gen_result_folder)
         output_path = gen_result_folder / output_file_name
