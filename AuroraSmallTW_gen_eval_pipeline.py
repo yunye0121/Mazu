@@ -248,7 +248,8 @@ def evaluate(args, model, dataloader, criterion_list, err_agg_list, device):
                     
                     log_weather_variable_error_with_lead_time(
                         loss_dict,
-                        t,
+                        # t,
+                        t * args.lead_time,
                         err_agg,
                     )
 
