@@ -5,30 +5,27 @@ draw_grid_compare_models_era5.py
 Grid figure: ERA5 (first row) + N model rows x V variables columns.
 Optionally insert a diff/error row after each model: (Model - ERA5).
 
-New: `--vars` entries may specify a pressure level by suffix: <base>_<level>
-Example vars:
+Supports --vars tokens with optional pressure level suffix:
   surf_2t surf_10u atmos_t_850 atmos_z_500
 Meaning:
-  - surf_2t: 2D variable (no level)
-  - atmos_t_850: variable "atmos_t" at 850 hPa
-  - atmos_z_500: variable "atmos_z" at 500 hPa
+  - surf_2t: 2D variable
+  - atmos_t_850: variable "atmos_t" at 850 hPa (select from a level dim)
 
-Mapping still works on the base name (e.g. atmos_t -> ERA5 t).
+Mapping is applied to the base name (e.g. atmos_t -> ERA5 t).
 
-Features:
-- Per-variable color scale standardized from ERA5 for value maps.
-- Each panel has its own colorbar.
-- Only left-side row labels + big variable titles on top row.
-- Hide all other ticks/axis labels.
-- Optional MAE box overlay on model rows (--show_mae_box).
-- Adjustable spacing between panels (--wspace/--hspace).
-- Adjustable row label and column title spacing (--rowlabel_x/--title_pad).
-- Optional super title (--suptitle).
-- Optional MAE table output (--mae_out).
+Key options:
+- --add_diff_rows: insert diff rows after each model
+- --show_mae_box: show MAE overlay in model panels
+- --model_value_scale {era5,model}:
+    * era5 (default): model value maps use ERA5 vmin/vmax (best for comparison)
+    * model: each model panel uses its own vmin/vmax (qualitative inspection)
+- Adjustable layout spacing: --wspace/--hspace, --cbar_pad, --rowlabel_x, --title_pad
+- Optional suptitle: --suptitle
+- Optional MAE table output: --mae_out (csv/json)
 
-Supports:
-- 2D lat/lon variables
-- 3D variables with a recognized level dim (selected by var suffix)
+Assumptions:
+- ERA5 is opened from upper.nc + sfc.nc and merged.
+- Variables are 2D lat/lon after selecting (optional) time and (optional) level.
 """
 
 import os
@@ -267,8 +264,8 @@ def select_level_if_needed(da: xr.DataArray, level_value: float, debug_name: str
 
 
 def plot_grid(
-    rows,               # list of row dicts: {"label": str, "kind": "era"|"model"|"diff", "data": {col_key: da}, "mae": {col_key: mae}}
-    era_row,            # dict col_key -> era da
+    rows,               # list: {"label": str, "kind": "era"|"model"|"diff", "data": {key: item}, "mae": {key: mae}}
+    era_row,            # dict key -> era da (2D)
     col_specs,          # list dicts: key, title, vmin/vmax, dvmin/dvmax
     outpath_no_ext,
     cmap_value,
@@ -286,6 +283,7 @@ def plot_grid(
     suptitle_fontsize=20,
     rowlabel_x=-0.22,
     title_pad=16,
+    model_value_scale="era5",
 ):
     nrows = len(rows)
     ncols = len(col_specs)
@@ -330,11 +328,20 @@ def plot_grid(
             ax = axes[i, j]
             key = cs["key"]
 
-            da = r["data"].get(key, None)
-            if da is None:
+            item = r["data"].get(key, None)
+            if item is None:
                 ax.text(0.5, 0.5, "MISSING", ha="center", va="center", transform=ax.transAxes)
                 ax.set_axis_off()
                 continue
+
+            # item is either a DataArray (era/diff) or dict (model)
+            if isinstance(item, dict):
+                da = item["da"]
+                model_vmin = item.get("vmin", None)
+                model_vmax = item.get("vmax", None)
+            else:
+                da = item
+                model_vmin = model_vmax = None
 
             da_e = era_row[key]
             x = da_e["longitude"].values
@@ -345,13 +352,16 @@ def plot_grid(
                 if vmin is None:
                     vmin, vmax = -1.0, 1.0
                 draw_cell(ax, x, y, da.values, vmin, vmax, cmap_diff)
+
+            elif r["kind"] == "model" and model_value_scale == "model" and model_vmin is not None:
+                draw_cell(ax, x, y, da.values, model_vmin, model_vmax, cmap_value)
+
             else:
-                vmin, vmax = cs["vmin"], cs["vmax"]
-                draw_cell(ax, x, y, da.values, vmin, vmax, cmap_value)
+                draw_cell(ax, x, y, da.values, cs["vmin"], cs["vmax"], cmap_value)
 
             hide_all(ax)
 
-            # Row label only on first column; make it horizontal
+            # Row label only on first column; horizontal
             if j == 0:
                 ax.text(
                     rowlabel_x, 0.5, r["label"],
@@ -426,6 +436,10 @@ def main():
     p.add_argument("--add_diff_rows", action="store_true",
                    help="Insert a diff row after each model row (Model - ERA5).")
 
+    p.add_argument("--model_value_scale", type=str, default="era5", choices=["era5", "model"],
+                   help="Value color scale for model rows: 'era5' (default) follows ERA5 scale; "
+                        "'model' auto-scales each model panel.")
+
     p.add_argument("--mae_out", type=str, default=None, help="Write MAE table to CSV/JSON (optional).")
 
     args = p.parse_args()
@@ -458,7 +472,6 @@ def main():
 
         da_e = maybe_select_first_time(era[era_var])
         da_e = select_latlon_range(da_e, lat_range, lon_range, debug_name=f"ERA5:{era_var}")
-
         da_e = select_level_if_needed(da_e, level, debug_name=f"ERA5:{era_var}")
         if da_e is None:
             continue
@@ -472,7 +485,7 @@ def main():
             print(f"[WARN] ERA5 '{era_var}' token '{var_token}' all-NaN. Skip.")
             continue
 
-        key = var_token  # unique column key (includes level suffix)
+        key = var_token
         title = base_var if level is None else f"{base_var} ({int(level)} hPa)"
 
         era_row[key] = da_e
@@ -498,9 +511,9 @@ def main():
 
     for path, lab in zip(args.pred_files, labels):
         ds = standardize_latlon(xr.open_dataset(path))
-        mdata = {}
-        mmae = {}
-        mdiff = {}
+        mdata = {}   # key -> {"da": da, "vmin":..., "vmax":...}  (for model rows)
+        mmae = {}    # key -> mae
+        mdiff = {}   # key -> diff da (DataArray)
 
         for cs in col_specs:
             key = cs["key"]
@@ -513,7 +526,6 @@ def main():
 
             da_p = maybe_select_first_time(ds[base_var])
             da_p = select_latlon_range(da_p, lat_range, lon_range, debug_name=f"{lab}:{base_var}")
-
             da_p = select_level_if_needed(da_p, level, debug_name=f"{lab}:{base_var}")
             if da_p is None:
                 continue
@@ -528,7 +540,13 @@ def main():
             mae = mae_l1(da_p_rg, da_e)
             diff = (da_p_rg - da_e)
 
-            mdata[key] = da_p_rg
+            # model-specific vmin/vmax if requested
+            if args.model_value_scale == "model":
+                mvmin, mvmax = finite_minmax(da_p_rg, robust=args.robust)
+            else:
+                mvmin = mvmax = None
+
+            mdata[key] = {"da": da_p_rg, "vmin": mvmin, "vmax": mvmax}
             mmae[key] = mae
             mdiff[key] = diff
 
@@ -558,7 +576,12 @@ def main():
 
     # Build rows for plotting
     rows = []
-    rows.append({"label": "ERA5", "kind": "era", "data": {cs["key"]: era_row[cs["key"]] for cs in col_specs}, "mae": {}})
+    rows.append({
+        "label": "ERA5",
+        "kind": "era",
+        "data": {cs["key"]: era_row[cs["key"]] for cs in col_specs},
+        "mae": {}
+    })
 
     for m in models:
         rows.append({"label": m["label"], "kind": "model", "data": m["data"], "mae": m["mae"]})
@@ -585,6 +608,7 @@ def main():
         suptitle_fontsize=args.suptitle_fontsize,
         rowlabel_x=args.rowlabel_x,
         title_pad=args.title_pad,
+        model_value_scale=args.model_value_scale,
     )
 
     if args.mae_out:
@@ -593,7 +617,6 @@ def main():
             with open(args.mae_out, "w", encoding="utf-8") as f:
                 json.dump(mae_records, f, indent=2)
         else:
-            # CSV
             keys = ["row_label", "pred_file", "token", "pred_base_var", "era_var", "level", "mae"]
             with open(args.mae_out, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=keys)
