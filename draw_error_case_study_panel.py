@@ -5,18 +5,30 @@ draw_grid_compare_models_era5.py
 Grid figure: ERA5 (first row) + N model rows x V variables columns.
 Optionally insert a diff/error row after each model: (Model - ERA5).
 
+New: `--vars` entries may specify a pressure level by suffix: <base>_<level>
+Example vars:
+  surf_2t surf_10u atmos_t_850 atmos_z_500
+Meaning:
+  - surf_2t: 2D variable (no level)
+  - atmos_t_850: variable "atmos_t" at 850 hPa
+  - atmos_z_500: variable "atmos_z" at 500 hPa
+
+Mapping still works on the base name (e.g. atmos_t -> ERA5 t).
+
 Features:
 - Per-variable color scale standardized from ERA5 for value maps.
 - Each panel has its own colorbar.
 - Only left-side row labels + big variable titles on top row.
 - Hide all other ticks/axis labels.
-- Optional MAE blue box overlay on model rows (--show_mae_box).
+- Optional MAE box overlay on model rows (--show_mae_box).
 - Adjustable spacing between panels (--wspace/--hspace).
-- Adjustable spacing for row label and column title (--rowlabel_x/--title_pad).
+- Adjustable row label and column title spacing (--rowlabel_x/--title_pad).
 - Optional super title (--suptitle).
 - Optional MAE table output (--mae_out).
 
-First version supports 2D lat/lon variables only.
+Supports:
+- 2D lat/lon variables
+- 3D variables with a recognized level dim (selected by var suffix)
 """
 
 import os
@@ -31,6 +43,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 TIME_DIMS = ["valid_time", "time", "history"]
 LAT_NAMES = ["latitude", "lat", "Latitude", "LAT"]
 LON_NAMES = ["longitude", "lon", "Longitude", "LON"]
+LEVEL_DIMS = ["pressure_level", "level", "plev", "isobaricInhPa"]
 
 
 def _first_existing(name_list, ds_or_da):
@@ -38,6 +51,29 @@ def _first_existing(name_list, ds_or_da):
         if n in getattr(ds_or_da, "dims", {}) or n in getattr(ds_or_da, "coords", {}):
             return n
     return None
+
+
+def find_level_dim(da: xr.DataArray):
+    for d in LEVEL_DIMS:
+        if d in da.dims:
+            return d
+    return None
+
+
+def parse_var_and_level(varname: str):
+    """
+    Parse variable name possibly ending with _<level>.
+    Examples:
+      surf_2t        -> ("surf_2t", None)
+      atmos_t_850    -> ("atmos_t", 850.0)
+      atmos_z_500    -> ("atmos_z", 500.0)
+    """
+    parts = varname.split("_")
+    if len(parts) >= 2 and parts[-1].isdigit():
+        base = "_".join(parts[:-1])
+        level = float(parts[-1])
+        return base, level
+    return varname, None
 
 
 def standardize_latlon(ds: xr.Dataset) -> xr.Dataset:
@@ -152,12 +188,10 @@ def normalize_lon_to_match(da_src: xr.DataArray, da_tgt: xr.DataArray) -> xr.Dat
     src_min = float(np.nanmin(src_lon))
     tgt_min = float(np.nanmin(tgt_lon))
 
-    # Target 0..360, src -180..180
     if tgt_min >= 0 and src_min < 0:
         da_src = da_src.assign_coords(longitude=((da_src["longitude"] + 360) % 360))
         da_src = da_src.sortby("longitude")
 
-    # Target -180..180, src 0..360
     if tgt_min < 0 and src_min >= 0:
         da_src = da_src.assign_coords(longitude=(((da_src["longitude"] + 180) % 360) - 180))
         da_src = da_src.sortby("longitude")
@@ -183,7 +217,6 @@ def open_era5_merged(upper_path: str, sfc_path: str) -> xr.Dataset:
 
 
 def parse_map_pairs(map_pairs):
-    """Parse --map entries like ['surf_2t=t2m', ...] into dict."""
     if not map_pairs:
         return {}
     out = {}
@@ -203,23 +236,40 @@ def load_map_json(path: str):
     return {str(k): str(v) for k, v in obj.items()}
 
 
-def resolve_era_var(pred_var: str, mapping: dict, map_mode: str) -> str:
-    """Return ERA5 var name corresponding to pred_var."""
+def resolve_era_var(pred_base_var: str, mapping: dict, map_mode: str) -> str:
+    """Return ERA5 var name corresponding to pred base var."""
     if not mapping:
-        return pred_var
+        return pred_base_var
     if map_mode == "aur_to_era":
-        return mapping.get(pred_var, pred_var)
-    # era_to_aur: mapping keys are ERA5; values are pred vars
+        return mapping.get(pred_base_var, pred_base_var)
     for era_k, pred_v in mapping.items():
-        if pred_v == pred_var:
+        if pred_v == pred_base_var:
             return era_k
-    return pred_var
+    return pred_base_var
+
+
+def select_level_if_needed(da: xr.DataArray, level_value: float, debug_name: str):
+    """Select a pressure level if level_value is not None."""
+    if level_value is None:
+        return da
+    lev_dim = find_level_dim(da)
+    if lev_dim is None:
+        print(f"[WARN] {debug_name}: requested level {level_value} but no level dim found in {da.dims}. Skip.")
+        return None
+    try:
+        return da.sel({lev_dim: level_value})
+    except Exception:
+        try:
+            return da.sel({lev_dim: level_value}, method="nearest")
+        except Exception:
+            print(f"[WARN] {debug_name}: cannot select level {level_value} on dim '{lev_dim}'. Skip.")
+            return None
 
 
 def plot_grid(
-    rows,               # list of row dicts: {"label": str, "kind": "era"|"model"|"diff", "data": {pred_var: da}, "mae": {pred_var: mae}}
-    era_row,            # dict pred_var -> era da
-    var_specs,          # list dicts: pred_var, era_var, vmin, vmax, dvmin, dvmax
+    rows,               # list of row dicts: {"label": str, "kind": "era"|"model"|"diff", "data": {col_key: da}, "mae": {col_key: mae}}
+    era_row,            # dict col_key -> era da
+    col_specs,          # list dicts: key, title, vmin/vmax, dvmin/dvmax
     outpath_no_ext,
     cmap_value,
     cmap_diff,
@@ -234,22 +284,11 @@ def plot_grid(
     hspace=0.35,
     suptitle=None,
     suptitle_fontsize=20,
-    rowlabel_x=-0.14,
+    rowlabel_x=-0.22,
     title_pad=16,
 ):
-    """
-    Rows: ERA5 first, then (Model, Diff) pairs if requested.
-    Cols: variables.
-
-    Only show:
-      - Row labels on left (first column only)
-      - Column titles on top row (big)
-    Hide all ticks/axis labels.
-    Each panel has its own colorbar with adjustable padding.
-    """
-
     nrows = len(rows)
-    ncols = len(var_specs)
+    ncols = len(col_specs)
 
     fig_w = max(9, 4.7 * ncols)
     fig_h = max(4, 2.8 * nrows)
@@ -282,51 +321,47 @@ def plot_grid(
         fig.colorbar(im, cax=cax)
         return im
 
-    # Column titles (top row only): pred var name
-    for j, vs in enumerate(var_specs):
-        axes[0, j].set_title(vs["pred_var"], fontsize=title_fontsize, pad=title_pad)
+    # Column titles (top row only)
+    for j, cs in enumerate(col_specs):
+        axes[0, j].set_title(cs["title"], fontsize=title_fontsize, pad=title_pad)
 
-    # Plot all rows
     for i, r in enumerate(rows):
-        for j, vs in enumerate(var_specs):
+        for j, cs in enumerate(col_specs):
             ax = axes[i, j]
-            pred_var = vs["pred_var"]
+            key = cs["key"]
 
-            da = r["data"].get(pred_var, None)
+            da = r["data"].get(key, None)
             if da is None:
                 ax.text(0.5, 0.5, "MISSING", ha="center", va="center", transform=ax.transAxes)
                 ax.set_axis_off()
                 continue
 
-            # coordinates always from ERA5 (same grid)
-            da_e = era_row[pred_var]
+            da_e = era_row[key]
             x = da_e["longitude"].values
             y = da_e["latitude"].values
 
             if r["kind"] == "diff":
-                vmin, vmax = vs["dvmin"], vs["dvmax"]
+                vmin, vmax = cs["dvmin"], cs["dvmax"]
                 if vmin is None:
-                    # fallback
                     vmin, vmax = -1.0, 1.0
                 draw_cell(ax, x, y, da.values, vmin, vmax, cmap_diff)
             else:
-                vmin, vmax = vs["vmin"], vs["vmax"]
+                vmin, vmax = cs["vmin"], cs["vmax"]
                 draw_cell(ax, x, y, da.values, vmin, vmax, cmap_value)
 
             hide_all(ax)
 
-            # Row label only on first column
+            # Row label only on first column; make it horizontal
             if j == 0:
                 ax.text(
                     rowlabel_x, 0.5, r["label"],
-                    rotation=00, ha="center", va="center",
+                    rotation=0, ha="right", va="center",
                     transform=ax.transAxes,
                     fontsize=rowlabel_fontsize, fontweight="bold"
                 )
 
-            # MAE box: only for model rows (optional)
             if show_mae_box and r["kind"] == "model":
-                mae = r.get("mae", {}).get(pred_var, float("nan"))
+                mae = r.get("mae", {}).get(key, float("nan"))
                 mae_str = f"{mae:.4g}" if np.isfinite(mae) else "NaN"
                 ax.text(
                     0.02, 0.98, f"MAE={mae_str}",
@@ -338,9 +373,8 @@ def plot_grid(
 
     top_margin = 0.88 if suptitle else 0.92
     fig.subplots_adjust(top=top_margin, wspace=wspace, hspace=hspace)
-
     if suptitle:
-        fig.suptitle(suptitle, fontsize=suptitle_fontsize, y=0.925)
+        fig.suptitle(suptitle, fontsize=suptitle_fontsize, y=0.97)
 
     os.makedirs(os.path.dirname(outpath_no_ext) or ".", exist_ok=True)
     outpath = f"{outpath_no_ext}.{fmt}"
@@ -351,51 +385,47 @@ def plot_grid(
 
 
 def main():
-    p = argparse.ArgumentParser(description="Grid compare: ERA5 (top row) + models (rows) × variables (cols).")
-    p.add_argument("--pred_files", type=str, nargs="+", required=True, help="Prediction model netcdf files.")
-    p.add_argument("--pred_labels", type=str, nargs="*", default=None, help="Optional labels for pred_files.")
+    p = argparse.ArgumentParser(description="Grid compare: ERA5 (top) + models (+ optional diff rows) × variables.")
+    p.add_argument("--pred_files", type=str, nargs="+", required=True)
+    p.add_argument("--pred_labels", type=str, nargs="*", default=None)
     p.add_argument("--era5_upper_file", type=str, required=True)
     p.add_argument("--era5_sfc_file", type=str, required=True)
 
-    p.add_argument("--output", type=str, default="grid_compare", help="Output path without extension.")
-    p.add_argument("--vars", type=str, nargs="+", required=True, help="Variables to plot (pred var names).")
+    p.add_argument("--output", type=str, default="grid_compare")
+    p.add_argument("--vars", type=str, nargs="+", required=True,
+                   help="Columns. Supports suffix _<level>, e.g. atmos_t_850 atmos_z_500.")
 
     p.add_argument("--latitude", type=float, nargs=2, metavar=("LAT1", "LAT2"))
     p.add_argument("--longitude", type=float, nargs=2, metavar=("LON1", "LON2"))
 
-    # Colormaps
     p.add_argument("--cmap", type=str, default="cividis", help="Colormap for value maps.")
-    p.add_argument("--diff_cmap", type=str, default="RdBu_r", help="Colormap for diff maps (diverging).")
-
+    p.add_argument("--diff_cmap", type=str, default="RdBu_r", help="Colormap for diff maps.")
     p.add_argument("--robust", action="store_true", help="Use percentile ranges for scaling (2-98%).")
     p.add_argument("--dpi", type=int, default=250)
     p.add_argument("--fmt", type=str, default="png")
 
-    # Mapping
-    p.add_argument("--map", action="append", default=[], help="Var mapping pair, e.g. --map surf_2t=t2m")
-    p.add_argument("--map_json", type=str, default=None, help="Path to JSON mapping dict.")
+    p.add_argument("--map", action="append", default=[])
+    p.add_argument("--map_json", type=str, default=None)
     p.add_argument("--map_mode", type=str, default="aur_to_era", choices=["aur_to_era", "era_to_aur"])
 
-    # Layout / style
-    p.add_argument("--title_fontsize", type=int, default=18, help="Column title fontsize.")
-    p.add_argument("--rowlabel_fontsize", type=int, default=14, help="Row label fontsize.")
-    p.add_argument("--cbar_pad", type=float, default=0.18, help="Gap between panel and its colorbar.")
-    p.add_argument("--cbar_size", type=str, default="4.5%", help="Colorbar width, e.g. '4.5%'.")
-    p.add_argument("--show_mae_box", action="store_true", help="Show MAE blue box in model panels.")
+    p.add_argument("--title_fontsize", type=int, default=18)
+    p.add_argument("--rowlabel_fontsize", type=int, default=14)
+    p.add_argument("--cbar_pad", type=float, default=0.18)
+    p.add_argument("--cbar_size", type=str, default="4.5%")
+    p.add_argument("--show_mae_box", action="store_true")
 
-    p.add_argument("--wspace", type=float, default=0.35, help="Horizontal space between grid columns.")
-    p.add_argument("--hspace", type=float, default=0.35, help="Vertical space between grid rows.")
-    p.add_argument("--suptitle", type=str, default=None, help="Super title shown on top of the figure.")
-    p.add_argument("--suptitle_fontsize", type=int, default=20, help="Fontsize for super title.")
+    p.add_argument("--wspace", type=float, default=0.35)
+    p.add_argument("--hspace", type=float, default=0.35)
+    p.add_argument("--suptitle", type=str, default=None)
+    p.add_argument("--suptitle_fontsize", type=int, default=20)
 
-    p.add_argument("--rowlabel_x", type=float, default=-0.14, help="Row label x-offset (negative = left).")
-    p.add_argument("--title_pad", type=float, default=16, help="Padding between column titles and top row panels.")
+    p.add_argument("--rowlabel_x", type=float, default=-0.22,
+                   help="Row label x-offset (negative = left). For horizontal labels, use ~ -0.18 to -0.28.")
+    p.add_argument("--title_pad", type=float, default=16)
 
-    # Diff rows
     p.add_argument("--add_diff_rows", action="store_true",
                    help="Insert a diff row after each model row (Model - ERA5).")
 
-    # Optional MAE output table
     p.add_argument("--mae_out", type=str, default=None, help="Write MAE table to CSV/JSON (optional).")
 
     args = p.parse_args()
@@ -414,38 +444,57 @@ def main():
     if not labels or len(labels) != len(args.pred_files):
         labels = [f"Model{i+1}" for i in range(len(args.pred_files))]
 
-    # Prepare ERA5 slices + per-column scales for value maps
-    era_row = {}
-    var_specs = []
-    for pred_var in args.vars:
-        era_var = resolve_era_var(pred_var, mapping, args.map_mode)
+    # Build ERA columns (each var token becomes one column)
+    era_row = {}      # key -> da (2D)
+    col_specs = []    # list of {key, title, vmin, vmax, dvmin, dvmax, base_var, level, era_var}
+
+    for var_token in args.vars:
+        base_var, level = parse_var_and_level(var_token)
+        era_var = resolve_era_var(base_var, mapping, args.map_mode)
+
         if era_var not in era.data_vars:
-            print(f"[WARN] ERA5 missing '{era_var}' (for pred '{pred_var}'), skip column.")
+            print(f"[WARN] ERA5 missing '{era_var}' (for token '{var_token}'), skip column.")
             continue
 
         da_e = maybe_select_first_time(era[era_var])
         da_e = select_latlon_range(da_e, lat_range, lon_range, debug_name=f"ERA5:{era_var}")
 
+        da_e = select_level_if_needed(da_e, level, debug_name=f"ERA5:{era_var}")
+        if da_e is None:
+            continue
+
         if set(da_e.dims) != {"latitude", "longitude"}:
-            print(f"[WARN] ERA5 '{era_var}' dims {da_e.dims} not 2D lat/lon. Skipping (first version).")
+            print(f"[WARN] ERA5 '{era_var}' token '{var_token}' dims {da_e.dims} not 2D lat/lon. Skip.")
             continue
 
         vmin, vmax = finite_minmax(da_e, robust=args.robust)
         if vmin is None:
-            print(f"[WARN] ERA5 '{era_var}' all-NaN. Skipping.")
+            print(f"[WARN] ERA5 '{era_var}' token '{var_token}' all-NaN. Skip.")
             continue
 
-        era_row[pred_var] = da_e
-        var_specs.append(dict(pred_var=pred_var, era_var=era_var, vmin=vmin, vmax=vmax, dvmin=None, dvmax=None))
+        key = var_token  # unique column key (includes level suffix)
+        title = base_var if level is None else f"{base_var} ({int(level)} hPa)"
 
-    if not var_specs:
-        raise SystemExit("[ERROR] No valid variables to plot after filtering.")
+        era_row[key] = da_e
+        col_specs.append({
+            "key": key,
+            "title": title,
+            "base_var": base_var,
+            "level": level,
+            "era_var": era_var,
+            "vmin": vmin,
+            "vmax": vmax,
+            "dvmin": None,
+            "dvmax": None,
+        })
 
-    # Build model rows, compute MAE and diffs
+    if not col_specs:
+        raise SystemExit("[ERROR] No valid columns to plot after filtering.")
+
+    # Build model rows + diffs
     models = []
     mae_records = []
-    # Collect diffs per variable to set symmetric diff scales
-    diffs_collect = {vs["pred_var"]: [] for vs in var_specs}
+    diffs_collect = {cs["key"]: [] for cs in col_specs}
 
     for path, lab in zip(args.pred_files, labels):
         ds = standardize_latlon(xr.open_dataset(path))
@@ -453,70 +502,73 @@ def main():
         mmae = {}
         mdiff = {}
 
-        for vs in var_specs:
-            pred_var = vs["pred_var"]
-            era_var = vs["era_var"]
+        for cs in col_specs:
+            key = cs["key"]
+            base_var = cs["base_var"]
+            level = cs["level"]
 
-            if pred_var not in ds.data_vars:
-                print(f"[WARN] {lab}: missing '{pred_var}' in {os.path.basename(path)}")
+            if base_var not in ds.data_vars:
+                print(f"[WARN] {lab}: missing '{base_var}' (for token '{key}') in {os.path.basename(path)}")
                 continue
 
-            da_p = maybe_select_first_time(ds[pred_var])
-            da_p = select_latlon_range(da_p, lat_range, lon_range, debug_name=f"{lab}:{pred_var}")
+            da_p = maybe_select_first_time(ds[base_var])
+            da_p = select_latlon_range(da_p, lat_range, lon_range, debug_name=f"{lab}:{base_var}")
+
+            da_p = select_level_if_needed(da_p, level, debug_name=f"{lab}:{base_var}")
+            if da_p is None:
+                continue
 
             if set(da_p.dims) != {"latitude", "longitude"}:
-                print(f"[WARN] {lab}:{pred_var} dims {da_p.dims} not 2D lat/lon. Skipping (first version).")
+                print(f"[WARN] {lab}:{base_var} token '{key}' dims {da_p.dims} not 2D lat/lon. Skip.")
                 continue
 
-            da_e = era_row[pred_var]
+            da_e = era_row[key]
             da_p_rg = regrid_pred_to_era5(da_p, da_e)
 
             mae = mae_l1(da_p_rg, da_e)
             diff = (da_p_rg - da_e)
 
-            mdata[pred_var] = da_p_rg
-            mmae[pred_var] = mae
-            mdiff[pred_var] = diff
+            mdata[key] = da_p_rg
+            mmae[key] = mae
+            mdiff[key] = diff
 
-            # collect diff values for scaling
-            diffs_collect[pred_var].append(np.asarray(diff.values).ravel())
+            diffs_collect[key].append(np.asarray(diff.values).ravel())
 
             mae_records.append({
                 "row_label": lab,
                 "pred_file": os.path.basename(path),
-                "pred_var": pred_var,
-                "era_var": era_var,
+                "token": key,
+                "pred_base_var": base_var,
+                "era_var": cs["era_var"],
+                "level": level,
                 "mae": mae,
             })
 
         models.append({"label": lab, "data": mdata, "mae": mmae, "diff": mdiff})
 
-    # Determine diff color scales per variable (symmetric around 0)
-    for vs in var_specs:
-        pv = vs["pred_var"]
-        if diffs_collect.get(pv) and len(diffs_collect[pv]) > 0:
-            allv = np.concatenate(diffs_collect[pv], axis=0)
+    # Diff scales per column (symmetric)
+    for cs in col_specs:
+        key = cs["key"]
+        if diffs_collect.get(key) and len(diffs_collect[key]) > 0:
+            allv = np.concatenate(diffs_collect[key], axis=0)
             dvmin, dvmax = symmetric_minmax_from_values(allv, robust=args.robust)
-            vs["dvmin"], vs["dvmax"] = dvmin, dvmax
+            cs["dvmin"], cs["dvmax"] = dvmin, dvmax
         else:
-            vs["dvmin"], vs["dvmax"] = None, None
+            cs["dvmin"], cs["dvmax"] = None, None
 
-    # Build row list for plotting
+    # Build rows for plotting
     rows = []
-    # ERA5 row
-    rows.append({"label": "ERA5", "kind": "era", "data": {pv: era_row[pv] for pv in era_row}, "mae": {}})
+    rows.append({"label": "ERA5", "kind": "era", "data": {cs["key"]: era_row[cs["key"]] for cs in col_specs}, "mae": {}})
 
-    # Model rows (and optional diff rows)
     for m in models:
         rows.append({"label": m["label"], "kind": "model", "data": m["data"], "mae": m["mae"]})
         if args.add_diff_rows:
-            rows.append({"label": f"Diff\n{m['label']}-ERA5", "kind": "diff", "data": m["diff"], "mae": {}})
+            rows.append({"label": f"Diff: {m['label']} - ERA5", "kind": "diff", "data": m["diff"], "mae": {}})
 
-    # Plot
     plot_grid(
         rows=rows,
         era_row=era_row,
-        var_specs=var_specs,
+        col_specs=col_specs,
         outpath_no_ext=args.output,
         cmap_value=args.cmap,
         cmap_diff=args.diff_cmap,
@@ -535,14 +587,14 @@ def main():
         title_pad=args.title_pad,
     )
 
-    # Optional MAE table
     if args.mae_out:
         os.makedirs(os.path.dirname(args.mae_out) or ".", exist_ok=True)
         if args.mae_out.lower().endswith(".json"):
             with open(args.mae_out, "w", encoding="utf-8") as f:
                 json.dump(mae_records, f, indent=2)
         else:
-            keys = ["row_label", "pred_file", "pred_var", "era_var", "mae"]
+            # CSV
+            keys = ["row_label", "pred_file", "token", "pred_base_var", "era_var", "level", "mae"]
             with open(args.mae_out, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=keys)
                 w.writeheader()
