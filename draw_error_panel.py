@@ -12,20 +12,23 @@ Features:
 - Optional custom legend labels (--legend_names ...)
 - Select subset of variables (--vars ...)
 
+UPDATED (per your request):
+- You can now specify a custom matplotlib style PER INPUT CSV via --styles, using
+  explicit kwargs like:
+    "marker=o,linestyle=--,linewidth=2,markersize=6,alpha=0.8"
+- The old logic "1 point => star, else => solid line" is removed. You control
+  the style explicitly per CSV. If you want star-only, pass:
+    "marker=*,linestyle=None,markersize=12"
+
 Usage examples:
 
-# Panel of 3 variables, shared legend at top, custom labels
+# Panel of 3 variables, shared legend at top, custom labels, custom styles
 python make_loss_scatter_plots.py \
   --csv_paths runs/a/metrics.csv runs/b/metrics.csv runs/c/metrics.csv \
   --legend_names "Baseline" "Improved v2" "Experimental" \
+  --styles "linestyle=-,linewidth=2" "linestyle=--,linewidth=2" "marker=*,linestyle=None,markersize=12" \
   --vars T2M RH W10 \
   --panel --panel_cols 3 --legend_top --legend_cols 3 \
-  --output_dir plots
-
-# Default legend, one figure per variable (filtered)
-python make_loss_scatter_plots.py \
-  --csv_paths runA.csv runB.csv \
-  --vars T2M RH W10 \
   --output_dir plots
 """
 
@@ -33,7 +36,7 @@ import argparse
 import math
 import re
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -56,8 +59,9 @@ def parse_args():
     p.add_argument("--dpi", type=int, default=300, help="Image DPI.")
     p.add_argument("--width", type=float, default=16.0, help="Figure width (inches). For panel: width of WHOLE figure.")
     p.add_argument("--height", type=float, default=8.0, help="Figure height (inches). For panel: height of WHOLE figure.")
-    p.add_argument("--alpha", type=float, default=0.9, help="Marker/line transparency.")
-    p.add_argument("--markersize", type=float, default=30.0, help="Marker size for single-point series (points^2).")
+    p.add_argument("--alpha", type=float, default=0.9, help="Default alpha if not provided in --styles.")
+    p.add_argument("--markersize", type=float, default=30.0,
+                   help="Default markersize if not provided in --styles. (plt.plot uses markersize, not area).")
     p.add_argument("--zip", action="store_true", help="Zip all images after saving.")
 
     # selection & layouts
@@ -70,7 +74,7 @@ def parse_args():
     p.add_argument("--legend_cols", type=int, default=3,
                    help="Number of columns for the top legend.")
 
-    # NEW: panel (grid of subplots)
+    # panel (grid of subplots)
     p.add_argument("--panel", action="store_true",
                    help="Create a panel grid: one subplot per selected variable.")
     p.add_argument("--panel_cols", type=int, default=3,
@@ -80,10 +84,18 @@ def parse_args():
     p.add_argument("--sharey", action="store_true",
                    help="Share Y axis across panel subplots. (Default off = independent axes)")
 
-    # NEW: custom legend labels
+    # custom legend labels
     p.add_argument("--legend_names", nargs="+", default=None,
                    help="Optional custom legend labels, one per CSV path. "
                         "If omitted or shorter than CSV count, missing labels fall back to folder/filename.")
+
+    # NEW: per-CSV explicit matplotlib style kwargs
+    p.add_argument("--styles", nargs="+", default=None,
+                   help=("Optional per-CSV matplotlib style kwargs (same length/order as --csv_paths).\n"
+                         "Format: 'key=val,key=val,...' e.g.\n"
+                         "  --styles 'linestyle=-,linewidth=2' 'marker=o,linestyle=None,markersize=6'\n"
+                         "Keys are passed to ax.plot(**kwargs): marker, linestyle, linewidth, markersize, alpha, etc.\n"
+                         "Tip: Use 'linestyle=None' for scatter-only markers."))
 
     return p.parse_args()
 
@@ -125,20 +137,85 @@ def label_for_index(i: int, path: Path, custom_names: Optional[List[str]]) -> st
     return default_run_label(path)
 
 
+def _coerce_value(v: str) -> Any:
+    """Best-effort coercion for --styles values."""
+    v = v.strip()
+    if v.lower() in {"none", "null"}:
+        return None
+    if v.lower() in {"true", "false"}:
+        return v.lower() == "true"
+    # int?
+    if re.fullmatch(r"[+-]?\d+", v):
+        try:
+            return int(v)
+        except Exception:
+            pass
+    # float?
+    if re.fullmatch(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?", v):
+        try:
+            return float(v)
+        except Exception:
+            pass
+    return v
+
+
+def parse_style_kwargs(style_str: str) -> Dict[str, Any]:
+    """
+    Parse "key=val,key=val,..." into a dict for ax.plot(**kwargs).
+    Example: "marker=o,linestyle=--,linewidth=2,markersize=6,alpha=0.8"
+    """
+    style_str = (style_str or "").strip()
+    if not style_str:
+        return {}
+
+    out: Dict[str, Any] = {}
+    parts = [p.strip() for p in style_str.split(",") if p.strip()]
+    for part in parts:
+        if "=" not in part:
+            raise ValueError(
+                f"Bad --styles token '{style_str}'. Expected 'key=val,key=val,...'. Problem part: '{part}'"
+            )
+        k, v = [x.strip() for x in part.split("=", 1)]
+        out[k] = _coerce_value(v)
+    return out
+
+
+def styles_by_csv(csv_paths: List[Path], styles: Optional[List[str]]) -> Dict[Path, Dict[str, Any]]:
+    """Build per-file style dicts, validating length if provided."""
+    if styles is None:
+        return {p: {} for p in csv_paths}
+    if len(styles) != len(csv_paths):
+        raise ValueError(
+            f"--styles must have the same length as --csv_paths "
+            f"(got {len(styles)} styles for {len(csv_paths)} CSVs)."
+        )
+    return {p: parse_style_kwargs(s) for p, s in zip(csv_paths, styles)}
+
+
 def plot_one_variable(ax,
                       var_name: str,
                       csv_paths: List[Path],
                       row_maps: Dict[Path, Dict[str, pd.Series]],
                       time_cols_by_file: Dict[Path, List[str]],
                       hours_by_file: Dict[Path, List[int]],
-                      alpha: float,
-                      markersize: float,
-                      legend_names: Optional[List[str]]) -> bool:
-    """Add the series for this variable (across all CSVs) onto ax. Returns True if anything was plotted."""
+                      alpha_default: float,
+                      markersize_default: float,
+                      legend_names: Optional[List[str]],
+                      style_by_file: Dict[Path, Dict[str, Any]]) -> bool:
+    """
+    Add the series for this variable (across all CSVs) onto ax.
+    Returns True if anything was plotted.
+
+    UPDATED:
+    - Uses per-CSV style kwargs (explicit control via --styles).
+    - Applies defaults (alpha/markersize) only if user didn't specify them.
+    - If user provides neither marker nor linestyle, defaults to a solid line.
+    """
     has_any = False
     for i, p in enumerate(csv_paths):
         if var_name not in row_maps[p]:
             continue
+
         row = row_maps[p][var_name]
         time_cols = time_cols_by_file[p]
         hours = hours_by_file[p]
@@ -155,23 +232,21 @@ def plot_one_variable(ax,
 
         label = label_for_index(i, p, legend_names)
 
-        if len(xs) == 1:
-            # Single point: plot a large star
-            ax.plot(xs, ys,
-                    marker='*',
-                    markersize=(markersize ** 0.5) * 3.0,
-                    linestyle='None',
-                    alpha=alpha,
-                    label=label,
-                    zorder=5)
-        else:
-            # Multiple points: line
-            ax.plot(xs, ys,
-                    linestyle='-',
-                    linewidth=2.0,
-                    alpha=alpha,
-                    label=label)
+        style = dict(style_by_file.get(p, {}))
+
+        # Defaults if user didn't specify
+        style.setdefault("alpha", alpha_default)
+        if style.get("marker", None) is not None:
+            style.setdefault("markersize", markersize_default)
+
+        # If user specified nothing about marker/linestyle, default to solid line
+        if "linestyle" not in style and "marker" not in style:
+            style["linestyle"] = "-"
+            style.setdefault("linewidth", 2.0)
+
+        ax.plot(xs, ys, label=label, **style)
         has_any = True
+
     return has_any
 
 
@@ -205,6 +280,9 @@ def main():
     if args.legend_names and len(args.legend_names) < len(csv_paths):
         print(f"Warning: --legend_names has {len(args.legend_names)} entries but there are {len(csv_paths)} CSVs. "
               f"Missing labels will use folder/filename.")
+
+    # Build per-CSV style map (NEW)
+    style_by_file = styles_by_csv(csv_paths, args.styles)
 
     # Read CSVs and cache their time axes
     frames: List[pd.DataFrame] = []
@@ -247,17 +325,23 @@ def main():
         ncols = max(1, args.panel_cols)
         nrows = math.ceil(n / ncols)
 
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols,
-                                 figsize=(args.width, args.height),
-                                 sharey=args.sharey, squeeze=False)
+        fig, axes = plt.subplots(
+            nrows=nrows,
+            ncols=ncols,
+            figsize=(args.width, args.height),
+            sharey=args.sharey,
+            squeeze=False,
+        )
 
         any_plotted = False
         flat_axes = [ax for row in axes for ax in row]
 
         for i, var_name in enumerate(plot_vars):
             ax = flat_axes[i]
-            did = plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
-                                    args.alpha, args.markersize, args.legend_names)
+            did = plot_one_variable(
+                ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
+                args.alpha, args.markersize, args.legend_names, style_by_file
+            )
             if did:
                 any_plotted = True
                 ax.set_title(str(var_name))
@@ -308,8 +392,10 @@ def main():
         fig, ax = plt.subplots(figsize=(args.width, args.height))
         any_plotted = False
         for var_name in plot_vars:
-            did = plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
-                                    args.alpha, args.markersize, args.legend_names)
+            did = plot_one_variable(
+                ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
+                args.alpha, args.markersize, args.legend_names, style_by_file
+            )
             any_plotted = any_plotted or did
 
         if any_plotted:
@@ -338,8 +424,10 @@ def main():
         for var_name in plot_vars:
             fig, ax = plt.subplots(figsize=(args.width, args.height))
 
-            if not plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
-                                     args.alpha, args.markersize, args.legend_names):
+            if not plot_one_variable(
+                ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
+                args.alpha, args.markersize, args.legend_names, style_by_file
+            ):
                 plt.close(fig)
                 continue
 

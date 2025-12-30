@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """
-Make one loss-vs-time SCATTER plot per variable from one or more CSVs like:
+Make one loss-vs-time plot per variable from one or more CSVs like:
 
   | <variable> | 1h | 2h | ... | 96h |
 
-Each plot contains multiple scatter series—one per CSV—so you can compare runs.
+Each plot contains one series per CSV, so you can compare runs.
 
-Usage:
+UPDATED (per your request):
+- You can now specify a custom style PER INPUT CSV via --styles, using explicit
+  matplotlib kwargs like:
+    "marker=o,linestyle=--,linewidth=2,markersize=6,alpha=0.8"
+
+Examples:
   python make_loss_scatter_plots.py \
     --csv_paths run1.csv run2.csv run3.csv \
     --legend_names "Run 1" "Run 2" "Run 3" \
+    --styles "linestyle=-,linewidth=2" "linestyle=--,linewidth=2" "marker=*,linestyle=None,markersize=12" \
     --output_dir plots --ext png --dpi 150 --zip
 """
 
 import argparse
 import re
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Any
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -30,7 +36,7 @@ def sanitize_filename(s: str) -> str:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Generate one scatter plot per variable from multiple CSVs.")
+    p = argparse.ArgumentParser(description="Generate one plot per variable from multiple CSVs.")
     p.add_argument(
         "--csv_paths",
         nargs="+",
@@ -42,13 +48,23 @@ def parse_args():
         nargs="+",
         help="Optional legend_names for each CSV (same length and order as --csv_paths).",
     )
+    p.add_argument(
+        "--styles",
+        nargs="+",
+        help=(
+            "Optional per-CSV matplotlib style kwargs (same length/order as --csv_paths).\n"
+            "Format: 'key=val,key=val,...' e.g.\n"
+            "  --styles 'linestyle=-,linewidth=2' 'marker=o,linestyle=None,markersize=6'\n"
+            "Supported keys are whatever plt.plot accepts (marker, linestyle, linewidth, markersize, alpha, etc.)."
+        ),
+    )
     p.add_argument("--output_dir", default="err_plots", help="Directory to save images.")
     p.add_argument("--ext", default="png", choices=["png", "jpg", "jpeg", "pdf", "svg"], help="Image format.")
     p.add_argument("--dpi", type=int, default=300, help="Image DPI.")
     p.add_argument("--width", type=float, default=6.0, help="Figure width (inches).")
     p.add_argument("--height", type=float, default=6.0, help="Figure height (inches).")
-    p.add_argument("--alpha", type=float, default=0.9, help="Marker transparency for scatters.")
-    p.add_argument("--markersize", type=float, default=30.0, help="Marker size for scatters (points^2).")
+    p.add_argument("--alpha", type=float, default=0.9, help="Default alpha if not provided in --styles.")
+    p.add_argument("--markersize", type=float, default=30.0, help="Default markersize if not provided in --styles.")
     p.add_argument("--zip", action="store_true", help="Zip all images after saving.")
     return p.parse_args()
 
@@ -90,12 +106,53 @@ def run_label(path: Path) -> str:
     Example:
     /home/user/experiments/runA/metrics.csv -> "runA"
     """
-    # `path.parts` returns a tuple of path components. The last element is the file
-    # name; the element before that is the parent folder we want.
     if len(path.parts) >= 3:
         return path.parts[-3]
-    # Fallback if for some reason the path has no parent folder.
     return path.stem
+
+
+def _coerce_value(v: str) -> Any:
+    """Best-effort coercion for style values."""
+    v = v.strip()
+    if v.lower() in {"none", "null"}:
+        return None
+    if v.lower() in {"true", "false"}:
+        return v.lower() == "true"
+    # try int
+    try:
+        if re.fullmatch(r"[+-]?\d+", v):
+            return int(v)
+    except Exception:
+        pass
+    # try float
+    try:
+        if re.fullmatch(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?", v):
+            return float(v)
+    except Exception:
+        pass
+    return v  # keep as string
+
+
+def parse_style_kwargs(style_str: str) -> Dict[str, Any]:
+    """
+    Parse "key=val,key=val,..." into a dict for plt.plot(**kwargs).
+    Example: "marker=o,linestyle=--,linewidth=2,markersize=6,alpha=0.8"
+    """
+    style_str = (style_str or "").strip()
+    if not style_str:
+        return {}
+
+    out: Dict[str, Any] = {}
+    parts = [p.strip() for p in style_str.split(",") if p.strip()]
+    for part in parts:
+        if "=" not in part:
+            raise ValueError(
+                f"Bad --styles token '{style_str}'. "
+                f"Expected 'key=val,key=val,...' (comma-separated). Problem part: '{part}'"
+            )
+        k, v = [x.strip() for x in part.split("=", 1)]
+        out[k] = _coerce_value(v)
+    return out
 
 
 def main():
@@ -114,8 +171,20 @@ def main():
             )
         label_by_file: Dict[Path, str] = {p: lbl for p, lbl in zip(csv_paths, args.legend_names)}
     else:
-        # fall back to existing run_label() behavior
-        label_by_file: Dict[Path, str] = {p: run_label(p) for p in csv_paths}
+        label_by_file = {p: run_label(p) for p in csv_paths}
+
+    # Determine style kwargs per CSV
+    if args.styles is not None:
+        if len(args.styles) != len(csv_paths):
+            raise ValueError(
+                f"--styles must have the same length as --csv_paths "
+                f"(got {len(args.styles)} styles for {len(csv_paths)} CSVs)."
+            )
+        style_by_file: Dict[Path, Dict[str, Any]] = {
+            p: parse_style_kwargs(s) for p, s in zip(csv_paths, args.styles)
+        }
+    else:
+        style_by_file = {p: {} for p in csv_paths}
 
     # Read all CSVs and cache their time axes
     frames: List[pd.DataFrame] = []
@@ -136,22 +205,17 @@ def main():
     # For quick lookup by (file -> variable -> row)
     row_maps: Dict[Path, Dict[str, pd.Series]] = {}
     for p, df, var_col in zip(csv_paths, frames, var_cols):
-        # map variable name (as str) to the row (Series)
-        row_maps[p] = {
-            str(v): row
-            for v, row in zip(df[var_col].astype(str).tolist(), df.itertuples(index=False, name=None))
-        }
-
-        # NOTE: df.itertuples returns tuples; we'll reconstruct a Series when needed
         df_cols = df.columns.tolist()
 
         def tuple_to_series(tup):
             return pd.Series(tup, index=df_cols)
 
-        # Replace values with Series
-        row_maps[p] = {k: tuple_to_series(v) for k, v in row_maps[p].items()}
+        row_maps[p] = {
+            str(v): tuple_to_series(tup)
+            for v, tup in zip(df[var_col].astype(str).tolist(), df.itertuples(index=False, name=None))
+        }
 
-    # Generate one plot per variable, adding a scatter for each CSV that contains it
+    # Generate one plot per variable, adding a series for each CSV that contains it
     for var_name in all_vars:
         plt.figure(figsize=(args.width, args.height))
 
@@ -159,47 +223,44 @@ def main():
         for p in csv_paths:
             if var_name not in row_maps[p]:
                 continue  # this CSV doesn't have the variable
+
             row = row_maps[p][var_name]
             time_cols = time_cols_by_file[p]
             hours = hours_by_file[p]
 
             # pull y values, skip non-numeric safely
             y = pd.to_numeric(row[time_cols], errors="coerce").values
-            # mask NaNs so they don't plot
             mask = pd.notna(y)
 
-            if mask.any():
-                xs = [h for h, m in zip(hours, mask) if m]
-                ys = [val for val, m in zip(y, mask) if m]
+            if not mask.any():
+                continue
 
-                if not xs:
-                    continue  # skip empty
+            xs = [h for h, m in zip(hours, mask) if m]
+            ys = [val for val, m in zip(y, mask) if m]
+            if not xs:
+                continue
 
-                if len(xs) == 1:
-                    # Only one data point — draw a large star
-                    plt.plot(
-                        xs,
-                        ys,
-                        marker="*",
-                        markersize=(args.markersize ** 0.5) * 3.0,
-                        linestyle="None",
-                        color=None,
-                        alpha=args.alpha,
-                        label=label_by_file[p],
-                        zorder=5,
-                    )
-                else:
-                    # Multiple points — draw a continuous solid line
-                    plt.plot(
-                        xs,
-                        ys,
-                        linestyle="-",
-                        linewidth=2.0,
-                        alpha=args.alpha,
-                        label=label_by_file[p],
-                    )
+            # Apply per-file style kwargs (explicit control)
+            style = dict(style_by_file.get(p, {}))
 
-                has_any = True
+            # Defaults if user didn't specify
+            style.setdefault("alpha", args.alpha)
+            # If a marker is present but markersize not specified, use CLI default
+            if style.get("marker", None) is not None:
+                style.setdefault("markersize", args.markersize)
+
+            # If user didn't specify any linestyle/marker at all, default to a solid line
+            if "linestyle" not in style and "marker" not in style:
+                style["linestyle"] = "-"
+                style.setdefault("linewidth", 2.0)
+
+            plt.plot(
+                xs,
+                ys,
+                label=label_by_file[p],
+                **style,
+            )
+            has_any = True
 
         if not has_any:
             plt.close()
@@ -207,7 +268,7 @@ def main():
 
         plt.xlabel("forecast hour")
         plt.ylabel("loss value")
-        plt.tick_params(axis="x", pad=6)  # increase distance between x-ticks and axis
+        plt.tick_params(axis="x", pad=6)
         plt.tick_params(axis="y", pad=6)
         plt.title(f"{var_name}")
         plt.grid(True)
