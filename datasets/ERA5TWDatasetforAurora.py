@@ -1,3 +1,4 @@
+from logging import info
 from pathlib import Path
 import pandas as pd
 import torch
@@ -85,11 +86,17 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
         return str(dir_path / f"{name}_upper.nc"), str(dir_path / f"{name}_sfc.nc")
 
+    # def __len__(self) -> int:
+    #     duration = self.end_date_hour - self.start_date_hour \
+    #         - pd.Timedelta(hours = self.lead_time + self.rollout_step + self.input_time_window) \
+    #         + pd.Timedelta(hours = 3)
+    #     return round(duration.total_seconds()) // (60 * 60)
+
     def __len__(self) -> int:
-        duration = self.end_date_hour - self.start_date_hour \
-            - pd.Timedelta(hours = self.lead_time + self.rollout_step + self.input_time_window) \
-            + pd.Timedelta(hours = 3)
-        return round(duration.total_seconds()) // (60 * 60)
+        duration = self.end_date_hour - self.start_date_hour
+        duration_interval = round(duration.total_seconds()) // (60 * 60)
+        total_interval = duration_interval + 1 - self.input_time_window + 1 - self.lead_time * self.rollout_step
+        return total_interval
 
     def _nc_to_dict(self, upper_nc, sfc_nc) -> dict:
         _d = {
@@ -162,3 +169,69 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         if self.get_datetime:
             result.append(date_hour_inputs[-1].strftime("%Y-%m-%d %H:%M:%S"))
         return tuple(result)
+
+    def check_last_timestep(self):
+        """
+        Check the last valid index and the final datetime accessed
+        by __getitem__ (both input and output).
+        """
+        last_index = len(self) - 1
+
+        # last input window
+        last_input_end = (
+            self.start_date_hour
+            + pd.Timedelta(hours=last_index + self.input_time_window - 1)
+        )
+
+        # last rollout output time
+        last_output_time = (
+            last_input_end
+            + pd.Timedelta(hours=self.lead_time * self.rollout_step)
+        )
+
+        info = {
+            "last_index": last_index,
+            "last_input_end_time": last_input_end,
+            "last_output_time": last_output_time,
+            "dataset_end_date_hour": self.end_date_hour,
+            "within_bounds": last_output_time <= self.end_date_hour,
+        }
+
+        return info
+
+if __name__ == "__main__":
+    # For quick testing
+
+    data_root_dir = "/home/yunye0121/era5_tw"
+    train_start_date_hour = "2013-01-01 00:00:00"
+    train_end_date_hour = "2013-01-31 23:00:00"
+    val_start_date_hour = "2022-01-01 00:00:00"
+    val_end_date_hour = "2022-12-31 23:00:00"
+    surface_variables = ["t2m", "u10", "v10", "msl"]
+    upper_variables = ["u", "v", "t", "q", "z"]
+    static_variables = ["lsm", "slt", "z"]
+    levels = [1000, 925, 850, 700, 500, 300, 150, 50]
+    latitude = [39.75, 5]
+    longitude = [100, 144.75]
+    lead_time = 6
+    input_time_window = 2
+    rollout_step = 16
+
+    ds = ERA5TWDatasetforAurora(
+        data_root_dir = data_root_dir,
+        start_date_hour = train_start_date_hour,
+        end_date_hour = train_end_date_hour,
+        upper_variables = upper_variables,
+        surface_variables = surface_variables,
+        static_variables = static_variables,
+        levels = levels,
+        latitude = latitude,
+        longitude = longitude,
+        lead_time = lead_time,
+        input_time_window = input_time_window,
+        rollout_step = rollout_step,
+    )
+
+    info = ds.check_last_timestep()
+    for k, v in info.items():
+        print(f"{k}: {v}")
