@@ -105,11 +105,17 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
         ]
         return _
 
+    # def __len__(self) -> int:
+    #     duration = self.end_date_hour - self.start_date_hour \
+    #         - pd.Timedelta(hours = self.lead_time + self.rollout_step + self.input_time_window) \
+    #         + pd.Timedelta(hours = 3)
+    #     return round(duration.total_seconds()) // (60 * 60)
+    
     def __len__(self) -> int:
-        duration = self.end_date_hour - self.start_date_hour \
-            - pd.Timedelta(hours = self.lead_time + self.rollout_step + self.input_time_window) \
-            + pd.Timedelta(hours = 3)
-        return round(duration.total_seconds()) // (60 * 60)
+        duration = self.end_date_hour - self.start_date_hour
+        duration_interval = round(duration.total_seconds()) // (60 * 60)
+        total_interval = duration_interval + 1 - self.input_time_window + 1 - self.lead_time * self.rollout_step
+        return total_interval
 
     def _nc_to_dict(self, upper_nc, sfc_nc) -> dict:
         _d = {
@@ -167,7 +173,8 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
             for i in range(self.input_time_window)
         ]
         date_hour_outputs = [
-            date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time + i) \
+            # date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time + i) \
+            date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time * (i + 1)) \
             for i in range(self.rollout_step)
         ]
 
