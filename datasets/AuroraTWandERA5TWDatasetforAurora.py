@@ -97,10 +97,18 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
         return str(dir_path / f"{name}_upper.nc"), str(dir_path / f"{name}_sfc.nc")
 
+    # def _dt_to_path_Aurora(self, date_hour: pd.Timestamp) -> str:
+    #     dir_path = Path(self.Aurora_input_dir)
+    #     _ = [
+    #         str(dir_path / f"{date_hour.strftime('%Y%m%d_%H%M%S')}+{i}hr.nc") \
+    #             for i in range(1, self.use_Aurora_input_len + 1)
+    #     ]
+    #     return _
+    
     def _dt_to_path_Aurora(self, date_hour: pd.Timestamp) -> str:
         dir_path = Path(self.Aurora_input_dir)
         _ = [
-            str(dir_path / f"{date_hour.strftime('%Y%m%d_%H%M%S')}+{i}hr.nc") \
+            str(dir_path / f"{date_hour.strftime('%Y%m%d_%H%M%S')}+{i * self.lead_time}hr.nc") \
                 for i in range(1, self.use_Aurora_input_len + 1)
         ]
         return _
