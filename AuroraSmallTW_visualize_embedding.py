@@ -131,33 +131,33 @@ def attach_swin_encoder_hook(model: torch.nn.Module):
     return handle, encoded_tokens_buf
 
 
-# # --------------------------------------------------------------
-# # Attach hook to Swin3D backbone *output* (after decoder)
-# # --------------------------------------------------------------
-# def attach_swin_output_hook(model: torch.nn.Module):
-#     """
-#     Hook the Swin3DTransformerBackbone itself to capture its final output tokens.
-#     Returns (hook_handle, output_tokens_buf).
-#     """
-#     swin_modules = [
-#         m for m in model.modules()
-#         if m.__class__.__name__ == "Swin3DTransformerBackbone"
-#     ]
-#     if not swin_modules:
-#         raise RuntimeError(
-#             "Could not find a module named 'Swin3DTransformerBackbone' inside Aurora model."
-#         )
+# --------------------------------------------------------------
+# Attach hook to Swin3D backbone *output* (after decoder)
+# --------------------------------------------------------------
+def attach_swin_output_hook(model: torch.nn.Module):
+    """
+    Hook the Swin3DTransformerBackbone itself to capture its final output tokens.
+    Returns (hook_handle, output_tokens_buf).
+    """
+    swin_modules = [
+        m for m in model.modules()
+        if m.__class__.__name__ == "Swin3DTransformerBackbone"
+    ]
+    if not swin_modules:
+        raise RuntimeError(
+            "Could not find a module named 'Swin3DTransformerBackbone' inside Aurora model."
+        )
 
-#     swin_backbone = swin_modules[0]
-#     output_tokens_buf = {}
+    swin_backbone = swin_modules[0]
+    output_tokens_buf = {}
 
-#     def backbone_output_hook(module, inputs, output):
-#         # Swin3D forward returns tokens x: (B, L, D_out)
-#         x = output
-#         output_tokens_buf["tokens"] = x.detach().cpu()  # (B, L, D_out)
+    def backbone_output_hook(module, inputs, output):
+        # Swin3D forward returns tokens x: (B, L, D_out)
+        x = output
+        output_tokens_buf["tokens"] = x.detach().cpu()  # (B, L, D_out)
 
-#     handle = swin_backbone.register_forward_hook(backbone_output_hook)
-#     return handle, output_tokens_buf
+    handle = swin_backbone.register_forward_hook(backbone_output_hook)
+    return handle, output_tokens_buf
 
 
 # --------------------------------------------------------------
@@ -199,7 +199,7 @@ def parse_args():
     parser.add_argument("--method", type=str, default="tsne",
                         choices=["tsne", "umap"])
     parser.add_argument("--encoder_visualization_output_path", type=str, default="embedding_encoder.png")
-    # parser.add_argument("--output_path_output", type=str, default="embedding_output.png")
+    parser.add_argument("--output_path_output", type=str, default="embedding_output.png")
 
     return parser.parse_args()
 
@@ -225,7 +225,7 @@ def main():
 
     # Attach hooks to Swin3D encoder and backbone output
     hook_enc, enc_buf = attach_swin_encoder_hook(model)
-    # hook_out, out_buf = attach_swin_output_hook(model)
+    hook_out, out_buf = attach_swin_output_hook(model)
 
     # ----------------------
     # Build dataset
@@ -237,7 +237,7 @@ def main():
     static_data = loader.dataset.get_static_vars_ds()
 
     all_feats_enc = []
-    # all_feats_out = []
+    all_feats_out = []
     all_labels = []
 
     # --------------------------------------------------------------
@@ -267,36 +267,36 @@ def main():
 
         # Clear previous hook contents
         enc_buf.clear()
-        # out_buf.clear()
+        out_buf.clear()
 
         # Forward through full Aurora model; hooks grab Swin3D encoder & output tokens
         _ = model(batch_obj)
 
         if "tokens" not in enc_buf:
             raise RuntimeError("Encoder hook did not capture tokens. Check wiring.")
-        # if "tokens" not in out_buf:
-        #     raise RuntimeError("Output hook did not capture tokens. Check wiring.")
+        if "tokens" not in out_buf:
+            raise RuntimeError("Output hook did not capture tokens. Check wiring.")
 
         tokens_enc = enc_buf["tokens"]   # (B, L, D_enc) on CPU
-        # tokens_out = out_buf["tokens"]   # (B, L, D_out) on CPU
+        tokens_out = out_buf["tokens"]   # (B, L, D_out) on CPU
 
         feats_enc = tokens_enc.mean(dim=1)   # (B, D_enc) pooled per sample
-        # feats_out = tokens_out.mean(dim=1)   # (B, D_out) pooled per sample
+        feats_out = tokens_out.mean(dim=1)   # (B, D_out) pooled per sample
 
         all_feats_enc.append(feats_enc)
-        # all_feats_out.append(feats_out)
+        all_feats_out.append(feats_out)
         all_labels.append(labels.cpu())
 
     # Done with hooks
     hook_enc.remove()
-    # hook_out.remove()
+    hook_out.remove()
 
     all_feats_enc = torch.cat(all_feats_enc).numpy()
-    # all_feats_out = torch.cat(all_feats_out).numpy()
+    all_feats_out = torch.cat(all_feats_out).numpy()
     all_labels = torch.cat(all_labels).numpy()
 
     print(f"Encoder feature shape = {all_feats_enc.shape}")
-    # print(f"Output  feature shape = {all_feats_out.shape}")
+    print(f"Output  feature shape = {all_feats_out.shape}")
 
     # --------------------------------------------------------------
     # Dimensionality reduction helper
@@ -310,7 +310,7 @@ def main():
         return reducer.fit_transform(feats)
 
     emb2d_enc = reduce(args.method, all_feats_enc)
-    # emb2d_out = reduce(args.method, all_feats_out)
+    emb2d_out = reduce(args.method, all_feats_out)
 
     # --------------------------------------------------------------
     # Plot encoder space
@@ -333,26 +333,26 @@ def main():
     plt.show()
     print(f"Saved encoder plot → {args.encoder_visualization_output_path}")
 
-    # # --------------------------------------------------------------
-    # # Plot backbone output space
-    # # --------------------------------------------------------------
-    # plt.figure(figsize=(9, 9))
-    # plt.scatter(
-    #     emb2d_out[:, 0],
-    #     emb2d_out[:, 1],
-    #     c=all_labels,
-    #     cmap="coolwarm",
-    #     s=8,
-    #     alpha=0.75,
-    # )
-    # plt.title(f"{args.method.upper()} – Swin3D Output Representation")
-    # plt.colorbar(label="Label (0=ERA5, 1=Aurora)")
-    # plt.xlabel("Dimension 1")
-    # plt.ylabel("Dimension 2")
-    # plt.tight_layout()
-    # plt.savefig(args.output_path_output, dpi=300)
-    # plt.show()
-    # print(f"Saved output plot → {args.output_path_output}")
+    # --------------------------------------------------------------
+    # Plot backbone output space
+    # --------------------------------------------------------------
+    plt.figure(figsize=(9, 9))
+    plt.scatter(
+        emb2d_out[:, 0],
+        emb2d_out[:, 1],
+        c=all_labels,
+        cmap="coolwarm",
+        s=8,
+        alpha=0.75,
+    )
+    plt.title(f"{args.method.upper()} – Swin3D Output Representation")
+    plt.colorbar(label="Label (0=ERA5, 1=Aurora)")
+    plt.xlabel("Dimension 1")
+    plt.ylabel("Dimension 2")
+    plt.tight_layout()
+    plt.savefig(args.output_path_output, dpi=300)
+    plt.show()
+    print(f"Saved output plot → {args.output_path_output}")
 
 
 if __name__ == "__main__":
