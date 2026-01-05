@@ -187,7 +187,7 @@ def main():
                 ),
             )
             batch_obj = batch_obj.to(device)
-            labels = labels.to(device)
+            # labels = labels.to(device)
 
             # Clear buffer
             hook_buf.clear()

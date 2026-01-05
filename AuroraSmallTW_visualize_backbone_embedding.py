@@ -176,7 +176,7 @@ def parse_args():
     parser.add_argument("--checkpoint_path", type=str, default=None)
 
     # Kept for compatibility with your old script; maps to checkpoint_path if given
-    parser.add_argument("--ckpt", type=str, default=None)
+    # parser.add_argument("--ckpt", type=str, default=None)
 
     # Data / dataset config (same as discriminator training)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -211,8 +211,8 @@ def main():
     args = parse_args()
 
     # Backwards compatibility: if --ckpt is provided, use it as checkpoint_path
-    if args.ckpt is not None and args.checkpoint_path is None:
-        args.checkpoint_path = args.ckpt
+    # if args.ckpt is not None and args.checkpoint_path is None:
+    #     args.checkpoint_path = args.ckpt
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

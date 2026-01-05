@@ -194,7 +194,7 @@ def parse_args():
 
     parser.add_argument("--use_pretrained_weight", action="store_true", default=False)
     parser.add_argument("--checkpoint_path", type=str, default=None)
-    parser.add_argument("--ckpt", type=str, default=None)
+    # parser.add_argument("--ckpt", type=str, default=None)
 
     # Data config
     parser.add_argument("--batch_size", type=int, default=4)
@@ -228,8 +228,8 @@ def parse_args():
 # --------------------------------------------------------------
 def main():
     args = parse_args()
-    if args.ckpt is not None and args.checkpoint_path is None:
-        args.checkpoint_path = args.ckpt
+    # if args.ckpt is not None and args.checkpoint_path is None:
+    #     args.checkpoint_path = args.ckpt
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
