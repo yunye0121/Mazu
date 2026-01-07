@@ -266,7 +266,7 @@ def select_level_if_needed(da: xr.DataArray, level_value: float, debug_name: str
 def plot_grid(
     rows,               # list: {"label": str, "kind": "era"|"model"|"diff", "data": {key: item}, "mae": {key: mae}}
     era_row,            # dict key -> era da (2D)
-    col_specs,          # list dicts: key, title, vmin/vmax, dvmin/dvmax
+    col_specs,          # list dicts: key, title, vmin/vmax, dvmin/dvmax, cmap (optional)
     outpath_no_ext,
     cmap_value,
     cmap_diff,
@@ -328,6 +328,9 @@ def plot_grid(
             ax = axes[i, j]
             key = cs["key"]
 
+            # Per-column value colormap (surf vs atmos), fallback to global cmap_value
+            value_cmap = cs.get("cmap", cmap_value)
+
             item = r["data"].get(key, None)
             if item is None:
                 ax.text(0.5, 0.5, "MISSING", ha="center", va="center", transform=ax.transAxes)
@@ -354,10 +357,10 @@ def plot_grid(
                 draw_cell(ax, x, y, da.values, vmin, vmax, cmap_diff)
 
             elif r["kind"] == "model" and model_value_scale == "model" and model_vmin is not None:
-                draw_cell(ax, x, y, da.values, model_vmin, model_vmax, cmap_value)
+                draw_cell(ax, x, y, da.values, model_vmin, model_vmax, value_cmap)
 
             else:
-                draw_cell(ax, x, y, da.values, cs["vmin"], cs["vmax"], cmap_value)
+                draw_cell(ax, x, y, da.values, cs["vmin"], cs["vmax"], value_cmap)
 
             hide_all(ax)
 
@@ -408,7 +411,7 @@ def main():
     p.add_argument("--latitude", type=float, nargs=2, metavar=("LAT1", "LAT2"))
     p.add_argument("--longitude", type=float, nargs=2, metavar=("LON1", "LON2"))
 
-    p.add_argument("--cmap", type=str, default="cividis", help="Colormap for value maps.")
+    p.add_argument("--cmap", type=str, default="cividis", help="Colormap for value maps (fallback).")
     p.add_argument("--diff_cmap", type=str, default="RdBu_r", help="Colormap for diff maps.")
     p.add_argument("--robust", action="store_true", help="Use percentile ranges for scaling (2-98%).")
     p.add_argument("--dpi", type=int, default=250)
@@ -460,7 +463,7 @@ def main():
 
     # Build ERA columns (each var token becomes one column)
     era_row = {}      # key -> da (2D)
-    col_specs = []    # list of {key, title, vmin, vmax, dvmin, dvmax, base_var, level, era_var}
+    col_specs = []    # list of {key, title, vmin, vmax, dvmin, dvmax, base_var, level, era_var, cmap}
 
     for var_token in args.vars:
         base_var, level = parse_var_and_level(var_token)
@@ -488,6 +491,15 @@ def main():
         key = var_token
         title = base_var if level is None else f"{base_var} ({int(level)} hPa)"
 
+        # NEW: per-column value colormap by variable family (surf vs atmos)
+        # Feel free to swap these to your preferred matplotlib colormaps.
+        if base_var.startswith("surf_"):
+            col_cmap = "viridis"
+        elif base_var.startswith("atmos_"):
+            col_cmap = "plasma"
+        else:
+            col_cmap = args.cmap  # fallback to global --cmap
+
         era_row[key] = da_e
         col_specs.append({
             "key": key,
@@ -499,6 +511,7 @@ def main():
             "vmax": vmax,
             "dvmin": None,
             "dvmax": None,
+            "cmap": col_cmap,   # NEW
         })
 
     if not col_specs:
@@ -593,7 +606,7 @@ def main():
         era_row=era_row,
         col_specs=col_specs,
         outpath_no_ext=args.output,
-        cmap_value=args.cmap,
+        cmap_value=args.cmap,          # still used as fallback
         cmap_diff=args.diff_cmap,
         dpi=args.dpi,
         fmt=args.fmt,

@@ -185,7 +185,8 @@ def evaluate(args, model, dataloader, criterion_list, err_agg_list, device):
     levels = dataloader.dataset.get_levels()
     static_data = dataloader.dataset.get_static_vars_ds()
 
-    with torch.no_grad():
+    # with torch.no_grad():
+    with torch.inference_mode():
         for batch in tqdm(dataloader, desc = "Evaluating"):
             inputs, labels, dates = batch
             for _k_var_type in inputs:
@@ -210,6 +211,8 @@ def evaluate(args, model, dataloader, criterion_list, err_agg_list, device):
                     atmos_levels = levels,
                 ),
             )
+
+            assert model.training is False
 
             use_amp = (args.mixed_precision in ("fp16", "bf16")) and (device.type == "cuda")
             if use_amp:
