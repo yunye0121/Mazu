@@ -599,7 +599,7 @@ def main():
     for m in models:
         rows.append({"label": m["label"], "kind": "model", "data": m["data"], "mae": m["mae"]})
         if args.add_diff_rows:
-            rows.append({"label": f"Diff: {m['label']} - ERA5", "kind": "diff", "data": m["diff"], "mae": {}})
+            rows.append({"label": f"Diff: {m['label']}", "kind": "diff", "data": m["diff"], "mae": {}})
 
     plot_grid(
         rows=rows,
