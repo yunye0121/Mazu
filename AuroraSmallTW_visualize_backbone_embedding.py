@@ -169,7 +169,7 @@ def parse_args():
     # Aurora model config
     parser.add_argument("--use_lora", action="store_true", default=False)
     parser.add_argument("--bf16_mode", action="store_true", default=False)
-    parser.add_argument("--timestep_hours", type=int, default=6)
+    parser.add_argument("--timestep_hours", type=int, default=1)
     parser.add_argument("--stabilise_level_agg", action="store_true", default=False)
 
     parser.add_argument("--use_pretrained_weight", action="store_true", default=False)

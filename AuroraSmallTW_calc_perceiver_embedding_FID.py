@@ -136,7 +136,7 @@ def main():
     # Model/Data args
     parser.add_argument("--use_lora", action="store_true")
     parser.add_argument("--bf16_mode", action="store_true")
-    parser.add_argument("--timestep_hours", type=int, default=6)
+    parser.add_argument("--timestep_hours", type=int, default=1)
     parser.add_argument("--stabilise_level_agg", action="store_true")
     parser.add_argument("--use_pretrained_weight", action="store_true")
     parser.add_argument('--forecast_hour', nargs='+', type=int, default=[6])
@@ -242,8 +242,8 @@ def main():
     print("="*40)
 
     # Optional: Save result to a simple text file for logging
-    with open("fid_results.txt", "a") as f:
-        f.write(f"Forecast_Hour: {args.forecast_hour} | FID: {fid:.4f}\n")
+    # with open("fid_results.txt", "a") as f:
+    #     f.write(f"Forecast_Hour: {args.forecast_hour} | FID: {fid:.4f}\n")
 
 if __name__ == "__main__":
     main()

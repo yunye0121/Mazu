@@ -368,7 +368,7 @@ def plot_grid(
             if j == 0:
                 ax.text(
                     rowlabel_x, 0.5, r["label"],
-                    rotation=0, ha="right", va="center",
+                    rotation=90, ha="right", va="center",
                     transform=ax.transAxes,
                     fontsize=rowlabel_fontsize, fontweight="bold"
                 )
