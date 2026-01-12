@@ -1,6 +1,5 @@
 import xarray as xr
 import matplotlib.pyplot as plt
-import math
 import argparse
 import os
 
@@ -11,24 +10,30 @@ def select_latlon_range(da, latitude_range, longitude_range):
     return da.sel(latitude=slice(lat_min, lat_max),
                   longitude=slice(lon_min, lon_max))
 
+def plot_clean_heatmap(da, filename, cmap, figsize):
+    """
+    Helper to plot a DataArray as a clean image (no axis, text, or padding)
+    and save it.
+    """
+    # Create figure
+    plt.figure(figsize=figsize)
+    
+    # Plot using xarray: disable labels and colorbar
+    da.plot(cmap=cmap, add_colorbar=False, add_labels=False)
+    
+    # Remove axis (ticks, spines, border)
+    plt.axis('off')
+    
+    # Ensure no title remains (xarray sometimes adds one even with add_labels=False)
+    plt.title("")
+    
+    # Save with tight bounding box and zero padding to remove whitespace
+    plt.savefig(filename, dpi=300, bbox_inches='tight', pad_inches=0)
+    plt.close()
+    print(f"Saved: {filename}")
+
 def plot_surf_vars(ds, figsize=(8, 6), outdir="plots_surf", cmap="cividis",
                    latitude_range=None, longitude_range=None):
-    """
-    Plots all 'surf_' variables as 2D heatmaps and saves each to a file.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        The opened dataset.
-    outdir : str
-        Directory to save output plots.
-    cmap : str
-        Colormap for the plots.
-    latitude_range : tuple or None
-        Tuple (min_lat, max_lat) to restrict plot. If None, plot all.
-    longitude_range : tuple or None
-        Tuple (min_lon, max_lon) to restrict plot. If None, plot all.
-    """
     os.makedirs(outdir, exist_ok=True)
     for var in ds.data_vars:
         if var.startswith("surf_"):
@@ -39,35 +44,15 @@ def plot_surf_vars(ds, figsize=(8, 6), outdir="plots_surf", cmap="cividis",
                 # --- Select by range if provided ---
                 if latitude_range is not None and longitude_range is not None:
                     da = select_latlon_range(da, latitude_range, longitude_range)
-                plt.figure(figsize=figsize)
-                im = da.plot(cmap=cmap)
-                plt.title(var)
-                plt.tight_layout()
-                plt.savefig(f"{outdir}/{var}.png", dpi=300)
-                plt.close()
-                print(f"Saved: {outdir}/{var}.png")
+                
+                filename = f"{outdir}/{var}.png"
+                plot_clean_heatmap(da, filename, cmap, figsize)
             else:
                 print(f"Skipping {var}: dims {da.dims} (not 2D lat/lon)")
     print("Done! All surf vars plotted.")
 
 def plot_atmos_vars_all_levels(ds, figsize=(8, 6), outdir="plots_atmos", cmap="viridis",
                               latitude_range=None, longitude_range=None):
-    """
-    Plots all 'atmos_' variables at all available pressure levels as 2D heatmaps and saves each to a file.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        The opened dataset.
-    outdir : str
-        Directory to save output plots.
-    cmap : str
-        Colormap for the plots.
-    latitude_range : tuple or None
-        Tuple (min_lat, max_lat) to restrict plot. If None, plot all.
-    longitude_range : tuple or None
-        Tuple (min_lon, max_lon) to restrict plot. If None, plot all.
-    """
     os.makedirs(outdir, exist_ok=True)
     for var in ds.data_vars:
         if var.startswith("atmos_"):
@@ -81,13 +66,9 @@ def plot_atmos_vars_all_levels(ds, figsize=(8, 6), outdir="plots_atmos", cmap="v
                         # --- Select by range if provided ---
                         if latitude_range is not None and longitude_range is not None:
                             da_level = select_latlon_range(da_level, latitude_range, longitude_range)
-                        plt.figure(figsize=figsize)
-                        da_level.plot(cmap=cmap)
-                        plt.title(f"{var} (level={lev})")
-                        plt.tight_layout()
-                        plt.savefig(f"{outdir}/{var}_{lev}.png", dpi=300)
-                        plt.close()
-                        print(f"Saved: {outdir}/{var}_{lev}.png")
+                        
+                        filename = f"{outdir}/{var}_{lev}.png"
+                        plot_clean_heatmap(da_level, filename, cmap, figsize)
                     else:
                         print(f"Skipping {var} at level {lev}: dims {da_level.dims} (not 2D lat/lon)")
             else:
@@ -96,7 +77,7 @@ def plot_atmos_vars_all_levels(ds, figsize=(8, 6), outdir="plots_atmos", cmap="v
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Plot surface and atmospheric variables from a NetCDF file."
+        description="Plot surface and atmospheric variables as clean images (no axis/labels)."
     )
     parser.add_argument(
         "--file_path", type=str, required=True,
@@ -120,14 +101,21 @@ if __name__ == "__main__":
     latitude_range = tuple(args.latitude) if args.latitude is not None else None
     longitude_range = tuple(args.longitude) if args.longitude is not None else None
 
+    # Load dataset
     batch_output_ds = xr.open_dataset(args.file_path)
     print(batch_output_ds)
 
     # Extract filename (used as folder name)
     date_str = os.path.splitext(os.path.basename(args.file_path))[0]
+    
     # Create subfolders in the output directory
     surf_outdir = os.path.join(args.output_dir, "plots_surf", date_str)
     atmos_outdir = os.path.join(args.output_dir, "plots_atmos", date_str)
+
+    # if base_var.startswith("surf_"):
+    #     col_cmap = "viridis"
+    # elif base_var.startswith("atmos_"):
+    #     col_cmap = "plasma"
 
     # Run Plotting
     plot_surf_vars(batch_output_ds, outdir=surf_outdir, cmap="viridis",

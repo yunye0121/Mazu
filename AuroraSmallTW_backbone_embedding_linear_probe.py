@@ -4,7 +4,7 @@ import torch.optim as optim
 import argparse
 import numpy as np
 import pandas as pd
-import os  # <--- Added for path checking
+import os
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from safetensors.torch import load_file
@@ -24,7 +24,7 @@ from aurora.model.aurora import AuroraSmall
 class LinearProbe(nn.Module):
     """
     A simple linear classifier.
-    Input:  Latent Feature Vector (dim=D)
+    Input:  Backbone Feature Vector (dim=D)
     Output: Logit (Scalar) - > Sigmoid gives probability of being 'Fake'
     """
     def __init__(self, input_dim):
@@ -36,7 +36,7 @@ class LinearProbe(nn.Module):
         return self.linear(x)
 
 # ==========================================
-# 3. Training Logic for the Probe (UPDATED)
+# 3. Training Logic for the Probe
 # ==========================================
 def train_and_evaluate_probe(real_feats, fake_feats, device, epochs=50, lr=1e-3, 
                              save_path=None, load_path=None):
@@ -118,16 +118,32 @@ def train_and_evaluate_probe(real_feats, fake_feats, device, epochs=50, lr=1e-3,
     return acc
 
 # ==========================================
-# 4. Feature Extraction Hook (Reused)
+# 4. Feature Extraction Hook (Swin3D Backbone)
 # ==========================================
-def attach_perceiver_encoder_hook(model):
-    if not hasattr(model, 'encoder'):
-        raise RuntimeError("Model does not have an 'encoder' attribute.")
-    encoded_buf = {}
-    def encoder_hook(module, inputs, output):
-        encoded_buf["tokens"] = output.detach() 
-    handle = model.encoder.register_forward_hook(encoder_hook)
-    return handle, encoded_buf
+def attach_swin_output_hook(model: torch.nn.Module):
+    """
+    Hook the Swin3DTransformerBackbone itself to capture its final output tokens.
+    """
+    # Locate the Swin3D Backbone module inside Aurora
+    swin_modules = [
+        m for m in model.modules()
+        if m.__class__.__name__ == "Swin3DTransformerBackbone"
+    ]
+    if not swin_modules:
+        raise RuntimeError(
+            "Could not find a module named 'Swin3DTransformerBackbone' inside Aurora model."
+        )
+
+    swin_backbone = swin_modules[0]
+    output_tokens_buf = {}
+
+    def backbone_output_hook(module, inputs, output):
+        # Swin3D forward returns tokens x: (B, L, D_out)
+        # We detach to save memory but keep on device for the probe loop
+        output_tokens_buf["tokens"] = output.detach()
+
+    handle = swin_backbone.register_forward_hook(backbone_output_hook)
+    return handle, output_tokens_buf
 
 # ==========================================
 # 5. Setup Helpers (Model & Data)
@@ -140,7 +156,13 @@ def create_model(args):
         stabilise_level_agg=args.stabilise_level_agg,
     )
     if args.use_pretrained_weight:
-         pass
+         # Standard pretrained loading logic if needed
+         print("Loading pretrained weights provided by Microsoft Aurora...")
+         model.load_checkpoint(
+             "microsoft/aurora",
+             "aurora-0.25-small-pretrained.ckpt",
+             strict=False,
+         )
     elif args.checkpoint_path:
         print(f"Loading Backbone Checkpoint: {args.checkpoint_path}")
         if args.checkpoint_path.endswith(".safetensors"):
@@ -194,7 +216,7 @@ def build_val_loader(args):
     return loader
 
 # ==========================================
-# 6. Main Execution (UPDATED)
+# 6. Main Execution
 # ==========================================
 def main():
     parser = argparse.ArgumentParser()
@@ -223,25 +245,25 @@ def main():
     parser.add_argument("--probe_epochs", type=int, default=50, help="Epochs to train linear probe")
     parser.add_argument("--probe_lr", type=float, default=1e-3, help="Learning rate for linear probe")
     
-    # NEW ARGS FOR SAVING/LOADING PROBE
-    parser.add_argument("--save_probe_path", type=str, default=None, help="Path to save the trained probe weights (e.g., probe.pth)")
+    # ARGS FOR SAVING/LOADING PROBE
+    parser.add_argument("--save_probe_path", type=str, default=None, help="Path to save the trained probe weights")
     parser.add_argument("--load_probe_path", type=str, default=None, help="Path to load existing probe weights from")
 
     args, _ = parser.parse_known_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. Load Backbone (Feature Extractor)
-    print("Loading Backbone Model...")
+    # 1. Load Model (Backbone Target)
+    print("Loading Aurora Model for Backbone Extraction...")
     model = create_model(args).to(device).eval()
     
-    # 2. Attach Hook
-    hook_handle, hook_buf = attach_perceiver_encoder_hook(model)
+    # 2. Attach Swin3D Hook (Changed from Perceiver)
+    hook_handle, hook_buf = attach_swin_output_hook(model)
 
     # 3. Load Data
     loader = build_val_loader(args)
 
     # 4. Extract Features
-    print("Extracting features...")
+    print(f"Extracting Swin3D Backbone features for forecast hours: {args.forecast_hour}")
     feats_real_list = []
     feats_fake_list = []
 
@@ -270,6 +292,7 @@ def main():
             _ = model(batch_obj)
             
             if "tokens" in hook_buf:
+                # Shape: (B, L, D_out) -> Mean pool -> (B, D_out)
                 current_feats = hook_buf["tokens"].mean(dim=1)
                 
                 real_mask = (labels == 0)
@@ -289,21 +312,21 @@ def main():
     tensor_real = torch.cat(feats_real_list, dim=0)
     tensor_fake = torch.cat(feats_fake_list, dim=0)
 
-    # 5. Train Probe (UPDATED CALL)
+    # 5. Train Probe
     accuracy = train_and_evaluate_probe(
         tensor_real, 
         tensor_fake, 
         device, 
         epochs=args.probe_epochs,
         lr=args.probe_lr,
-        save_path=args.save_probe_path, # Pass save path
-        load_path=args.load_probe_path  # Pass load path
+        save_path=args.save_probe_path, 
+        load_path=args.load_probe_path
     )
 
     # 6. Final Report
     print("\n" + "="*40)
     print(f" EXPERIMENT RESULTS: {args.forecast_hour} hours")
-    print(f" Input Directory: {args.Aurora_input_dir}")
+    print(f" Type: Swin3D Backbone Linear Probe")
     print("-" * 40)
     print(f" Linear Probe Test Accuracy: {accuracy:.2f}%")
     print(" (50% = Indistinguishable / Perfect Distribution)")
