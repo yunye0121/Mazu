@@ -97,6 +97,134 @@ def rollout_with_gpu_toy(
                 },
             )
 
+def rollout_with_gpu_toy_noise(
+        model,
+        batch,
+        steps,
+        ground_truth_list=None,
+        # --- New Arguments for Noise ---
+        gaussian_noise_std=0.0, 
+        scales=None,            # Dict mapping var_name -> std value
+        levels=None             # List/Tensor of pressure levels [50, 100, ...]
+    ):
+    """
+    Perform a roll-out. 
+    If ground_truth_list is provided, uses Teacher Forcing.
+    If gaussian_noise_std > 0, adds noise to the GT before feeding it back.
+    """
+    # 1. Init
+    batch = model.batch_transform_hook(batch)
+    p = next(model.parameters())
+    batch = batch.type(p.dtype)
+    batch = batch.crop(model.patch_size)
+    batch = batch.to(p.device)
+
+    # 2. Loop
+    for i in range(steps):
+        pred = model(batch)
+        yield pred
+        
+        # --- PREPARE INPUT FOR NEXT STEP ---
+        
+        if ground_truth_list is not None:
+            # === TEACHER FORCING MODE ===
+            
+            # Get the ground truth for the CURRENT step
+            gt_step = ground_truth_list[i] 
+
+            # --- [START NOISE INJECTION] ---
+            # We must use a separate variable so we don't mutate ground_truth_list in-place
+            if gaussian_noise_std > 0.0 and scales is not None:
+                
+                # Create a container for the noisy data
+                gt_step_noisy = {
+                    "surf_vars": {},
+                    "atmos_vars": {}
+                }
+
+                # A. Surface Variables
+                for var_name, tensor in gt_step["surf_vars"].items():
+                    # tensor shape is likely [B, 1, H, W]
+                    
+                    if var_name in scales:
+                        fixed_std = scales[var_name]
+                        
+                        # Generate Noise
+                        noise = torch.randn_like(tensor) * fixed_std * gaussian_noise_std
+                        
+                        # Add to a CLONE of the data (to avoid corrupting original dataset)
+                        gt_step_noisy["surf_vars"][var_name] = tensor.clone() + noise
+                    else:
+                        gt_step_noisy["surf_vars"][var_name] = tensor
+
+                # B. Atmospheric Variables
+                # tensor shape is likely [B, 1, Levels, H, W]
+                for var_name, tensor in gt_step["atmos_vars"].items():
+                    
+                    # Build scale tensor for the levels
+                    level_scales = []
+                    found_levels = True
+                    
+                    # Ensure we have the levels list to map keys like "t_50"
+                    current_levels = levels if levels is not None else []
+                    
+                    for lvl in current_levels:
+                        key = f"{var_name}_{int(lvl)}" # e.g. "t_50"
+                        if key in scales:
+                            level_scales.append(scales[key])
+                        else:
+                            found_levels = False
+                            break
+                    
+                    if found_levels:
+                        # Convert list to tensor: [L] -> [1, 1, L, 1, 1]
+                        scale_tensor = torch.tensor(level_scales, device=tensor.device, dtype=tensor.dtype)
+                        scale_tensor = scale_tensor.view(1, 1, -1, 1, 1)
+
+                        # Generate Noise
+                        # Note: 'tensor' here is the GT slice.
+                        noise = torch.randn_like(tensor) * scale_tensor * gaussian_noise_std
+                        
+                        gt_step_noisy["atmos_vars"][var_name] = tensor.clone() + noise
+                    else:
+                        gt_step_noisy["atmos_vars"][var_name] = tensor
+
+                # Use the noisy version for update
+                current_step_data = gt_step_noisy
+
+            else:
+                # No noise, use pure Ground Truth
+                current_step_data = gt_step
+            # --- [END NOISE INJECTION] ---
+
+            # Update History
+            batch = dataclasses.replace(
+                pred,
+                surf_vars={
+                    k: torch.cat([batch.surf_vars[k][:, 1:], current_step_data["surf_vars"][k]], dim=1)
+                    for k in batch.surf_vars.keys()
+                },
+                atmos_vars={
+                    k: torch.cat([batch.atmos_vars[k][:, 1:], current_step_data["atmos_vars"][k]], dim=1)
+                    for k in batch.atmos_vars.keys()
+                },
+            )
+
+        else:
+            # === AUTOREGRESSIVE MODE ===
+            batch = dataclasses.replace(
+                pred,
+                surf_vars={
+                    k: torch.cat([batch.surf_vars[k][:, 1:], v], dim=1)
+                    for k, v in pred.surf_vars.items()
+                },
+                atmos_vars={
+                    k: torch.cat([batch.atmos_vars[k][:, 1:], v], dim=1)
+                    for k, v in pred.atmos_vars.items()
+                },
+            )
+
+
 
 def rollout_with_multiple_gpu(
         model,
