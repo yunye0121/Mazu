@@ -196,7 +196,8 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
                 in_t_list.append(self._nc_to_dict(upper_nc_in, sfc_nc_in))
 
         Aurora_in_t_list = []
-        Aurora_start_dt = date_hour_inputs[-1] - pd.Timedelta(hours = self.use_Aurora_input_len)
+        # Aurora_start_dt = date_hour_inputs[-1] - pd.Timedelta(hours = self.use_Aurora_input_len)
+        Aurora_start_dt = date_hour_inputs[-1] - pd.Timedelta(hours = self.use_Aurora_input_len * self.lead_time)
         Aurora_dt_list = self._dt_to_path_Aurora( Aurora_start_dt )
         for Aurora_dt_path in Aurora_dt_list:
             with xr.open_dataset(Aurora_dt_path) as Aurora_nc:

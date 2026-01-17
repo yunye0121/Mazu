@@ -378,6 +378,11 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
                 lead_time=args.lead_time
             )
 
+            # [PRINT 1] Check storage (Only print occasionally to avoid spam, e.g., every 10 steps)
+            if train_global_step % 10 == 0 and accelerator.is_main_process:
+                print(f"\n[DEBUG] Step {train_global_step}: Stored item in Replay Buffer. Current Size: {len(replay_buffer)}")
+
+
         # --- 3. Replay Fine-tuning (Optimized) ---
         if train_global_step > args.replay_start_step and len(replay_buffer) > 0:
             
@@ -424,7 +429,6 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
                         dataset=real_dataset,
                         lead_time=args.lead_time
                     )
-        
         # --- End Replay ---
 
         if accelerator.is_main_process:
