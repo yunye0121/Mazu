@@ -3,8 +3,7 @@
 Generate loss-vs-time plots from one or more CSVs.
 
 UPDATES:
-- Added --top_margin to reserve space at the top (fixes legend overlapping titles).
-- Includes --theme, --bg_color, and full font controls.
+- Added --var_map for custom variable titles.
 """
 
 import argparse
@@ -44,27 +43,25 @@ def parse_args():
     p.add_argument("--subplot_height", type=float, default=3.5,
                    help="Height of ONE subplot in panel mode.")
     
-    # --- Spacing & Positioning (CRITICAL FIX) ---
+    # --- Spacing & Positioning ---
     p.add_argument("--top_margin", type=float, default=1,
-                   help="Top margin limit for subplots (0.0 to 1.0). "
-                        "Set lower (e.g. 0.85) to make more room for top legend.")
+                   help="Top margin limit for subplots (0.0 to 1.0).")
     p.add_argument("--title_y", type=float, default=None,
-                   help="Vertical position of the main Figure super-title. "
-                        "Defaults to 0.98 if set, typically above the legend.")
+                   help="Vertical position of the main Figure super-title.")
     p.add_argument("--legend_y", type=float, default=0.98,
-                   help="Vertical position (anchor) of the top legend. Default 0.98.")
+                   help="Vertical position (anchor) of the top legend.")
 
     # --- Aesthetics ---
     p.add_argument("--theme", type=str, default=None,
-                   help="Matplotlib style theme (e.g., 'seaborn-v0_8-darkgrid').")
+                   help="Matplotlib style theme.")
     p.add_argument("--bg_color", type=str, default=None,
-                   help="Manual background color override (e.g. 'white', '#EAEAF2').")
+                   help="Manual background color override.")
     p.add_argument("--alpha", type=float, default=0.9, help="Default alpha.")
     p.add_argument("--markersize", type=float, default=30.0, help="Default markersize.")
 
     # --- Fonts & Text ---
     p.add_argument("--font_family", type=str, default="sans-serif",
-                   help="Font family (e.g., 'sans-serif', 'serif', 'Arial').")
+                   help="Font family.")
     p.add_argument("--base_size", type=float, default=12.0,
                    help="Base font size.")
     p.add_argument("--title_size", type=float, default=14.0,
@@ -89,6 +86,10 @@ def parse_args():
     # styling
     p.add_argument("--legend_names", nargs="+", default=None, help="Custom legend labels.")
     p.add_argument("--styles", nargs="+", default=None, help="Per-CSV style kwargs.")
+
+    # ### NEW ADDITION 1: Argument for Title Mapping ###
+    p.add_argument("--var_map", action="append", default=[], 
+                   help="Map var names to titles: --var_map loss_val='Validation Loss'")
 
     return p.parse_args()
 
@@ -130,7 +131,6 @@ def parse_style_kwargs(style_str: str) -> Dict[str, Any]:
     for part in parts:
         if "=" not in part: continue
         k, v = [x.strip() for x in part.split("=", 1)]
-        # Basic type coercion
         if v.lower() in {"none", "null"}: v_coerced = None
         elif v.lower() == "true": v_coerced = True
         elif v.lower() == "false": v_coerced = False
@@ -202,6 +202,16 @@ def dedup_legend_from_axes(axes: List[plt.Axes]):
 def main():
     args = parse_args()
 
+    # ### NEW ADDITION 2: Parse Title Map ###
+    var_mapping = {}
+    for m in args.var_map:
+        if "=" in m:
+            k, v = m.split("=", 1)
+            var_mapping[k.strip()] = v.strip()
+    
+    # Helper to get display name
+    get_title = lambda v: var_mapping.get(v, v)
+
     # 1. Apply Theme & Fonts
     if args.theme:
         try: plt.style.use(args.theme)
@@ -251,7 +261,6 @@ def main():
         total_w = args.subplot_width * ncols
         total_h = args.subplot_height * nrows
         
-        # Add slight extra height if legend is top to ensure aspect ratio holds
         if args.legend_top: total_h += 0.5 
 
         fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(total_w, total_h),
@@ -265,7 +274,8 @@ def main():
             if plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
                                  args.alpha, args.markersize, args.legend_names, style_by_file):
                 any_plotted = True
-                ax.set_title(str(var_name))
+                # ### NEW ADDITION 3a: Use custom title ###
+                ax.set_title(get_title(str(var_name)))
                 ax.set_xlabel("hours")
                 ax.grid(True)
             else:
@@ -279,12 +289,9 @@ def main():
 
             if args.legend_top:
                 h, l = dedup_legend_from_axes([ax for ax in flat_axes if ax.get_visible()])
-                # Legend placed at (0.5, legend_y) relative to the whole figure
                 fig.legend(handles=h, labels=l, loc="lower center", 
                            bbox_to_anchor=(0.5, args.legend_y), 
                            ncol=args.legend_cols, frameon=True)
-                
-                # CRITICAL FIX: Push subplots down using top_margin
                 plt.tight_layout(rect=[0, 0, 1, args.top_margin])
             else:
                 for ax in reversed(flat_axes):
@@ -294,7 +301,6 @@ def main():
                 plt.tight_layout()
 
             if args.panel_title:
-                # If there's a super-title, place it even higher than the legend
                 y_title = args.title_y if args.title_y else (args.legend_y + 0.05)
                 fig.suptitle(args.panel_title, y=y_title, fontsize=args.title_size+4)
 
@@ -345,7 +351,8 @@ def main():
             if plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
                                  args.alpha, args.markersize, args.legend_names, style_by_file):
                 ax.set_xlabel("hours")
-                ax.set_title(f"{var_name}")
+                # ### NEW ADDITION 3b: Use custom title ###
+                ax.set_title(get_title(str(var_name)))
                 ax.grid(True)
                 
                 save_kwargs = {'dpi': args.dpi, 'bbox_inches': 'tight'}

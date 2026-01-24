@@ -3,16 +3,6 @@
 draw_time_series_split.py
 
 Generates time-series grid plots where EACH TIME STEP comes from DIFFERENT files.
-
-Features:
-  - Separate ERA5/Model files per timestamp (via JSON manifest)
-  - Adjust spacing (--wspace, --hspace)
-  - Consolidated colorbars (--single_cbar)
-  - Global vmin/vmax scaling across all time steps
-  - Auto-centering of title over the plot area
-
-Usage:
-  python3 draw_time_series_split.py --manifest list.json --vars surf_2t ...
 """
 
 import os
@@ -92,7 +82,6 @@ def get_first_time(da):
 
 def regrid_to_era(da_p, da_e):
     """Regrid prediction to match ERA5 grid."""
-    # Handle 0..360 vs -180..180 longitude mismatch
     if "longitude" in da_p.coords:
         if da_e.longitude.min() < 0 and da_p.longitude.min() >= 0:
             da_p = da_p.assign_coords(longitude=(((da_p.longitude + 180) % 360) - 180)).sortby("longitude")
@@ -105,7 +94,6 @@ def regrid_to_era(da_p, da_e):
     )
 
 def finite_minmax(vals, robust=False):
-    """Calculate min/max ignoring NaNs."""
     v = vals[np.isfinite(vals)]
     if v.size == 0: return 0, 1
     if robust:
@@ -113,7 +101,6 @@ def finite_minmax(vals, robust=False):
     return v.min(), v.max()
 
 def symmetric_minmax(vals, robust=False):
-    """Calculate symmetric min/max centered on 0."""
     v = vals[np.isfinite(vals)]
     if v.size == 0: return -1, 1
     mx = np.percentile(np.abs(v), 98) if robust else np.abs(v).max()
@@ -124,7 +111,7 @@ def symmetric_minmax(vals, robust=False):
 
 def plot_grid(
     col_data, 
-    var_name, 
+    var_name,        # This is the string displayed in the title
     outpath, 
     vmin, vmax, 
     dvmin, dvmax, 
@@ -134,29 +121,24 @@ def plot_grid(
     single_cbar=False
 ):
     cols = len(col_data)
-    # Figure size: Scale width by number of columns
     fig_w = max(10, 4.0 * cols)
     fig_h = 9
     
     fig, axes = plt.subplots(3, cols, figsize=(fig_w, fig_h))
     
-    # Ensure axes is always 2D array [row, col]
     if cols == 1:
         axes = np.expand_dims(axes, axis=1)
 
-    labels = ["ERA5 (Truth)", "Prediction", "Diff (Pred-ERA)"]
+    labels = ["GroundTruth", "Prediction", "Difference"]
     
-    # Store mappables for consolidated colorbar
     im_val = None
     im_diff = None
 
     for j, item in enumerate(col_data):
         ax_col = axes[:, j]
-        
-        # Column Header (Time)
-        ax_col[0].set_title(f"+{item['hour']}h", fontsize=14, pad=16, fontweight='bold')
+        # ax_col[0].set_title(f"+{item['hour']}h", fontsize=14, pad=16, fontweight='bold')
+        ax_col[0].set_title(f"+{item['hour']}h", fontsize=14, pad=16)
 
-        # Rows: 0=ERA, 1=Pred, 2=Diff
         rows_to_plot = [
             ("era",  item['era'],  vmin, vmax, cmap),
             ("pred", item['pred'], vmin, vmax, cmap),
@@ -177,59 +159,43 @@ def plot_grid(
                 vmin=vm, vmax=vx, cmap=cm, shading='nearest'
             )
             
-            # Save reference for external colorbars
-            if i < 2: im_val = im   # ERA or Pred use value map
-            else:     im_diff = im  # Diff uses diff map
+            if i < 2: im_val = im   
+            else:     im_diff = im  
 
-            # Clean up ticks
             ax.set_xticks([])
             ax.set_yticks([])
             
-            # Row Labels (First column only)
             if j == 0:
                 ax.text(-0.15, 0.5, labels[i], 
                         rotation=90, va='center', ha='center',
                         transform=ax.transAxes, 
-                        fontweight='bold', fontsize=14)
+                        fontsize=14)
+                        # fontweight='bold', fontsize=14)
 
-            # Per-panel colorbars (if NOT using single_cbar)
             if not single_cbar:
                 divider = make_axes_locatable(ax)
                 cax = divider.append_axes("right", size="5%", pad=0.05)
                 fig.colorbar(im, cax=cax)
 
-    # Adjust layout
-    # If single_cbar is True, we leave more room on the right
     right_margin = 0.90 if single_cbar else 0.98
     plt.subplots_adjust(wspace=wspace, hspace=hspace, right=right_margin, top=0.92)
 
-    # --- Consolidated Colorbars ---
     if single_cbar:
-        # 1. Main Value Colorbar (Spans ERA & Pred rows)
         if im_val:
-            # Position: [left, bottom, width, height]
-            # Coordinates are figure-relative (0 to 1)
             cax_val = fig.add_axes([0.92, 0.40, 0.015, 0.45]) 
             cb_val = fig.colorbar(im_val, cax=cax_val)
-            cb_val.set_label("Value", fontsize=12)
-
-        # 2. Diff Colorbar (Spans Diff row)
         if im_diff:
             cax_diff = fig.add_axes([0.92, 0.12, 0.015, 0.22]) 
             cb_diff = fig.colorbar(im_diff, cax=cax_diff)
-            cb_diff.set_label("Difference", fontsize=12)
 
-    # --- Title Centering Logic ---
-    # We calculate the visual center of the plot area (ignoring the sidebar)
     if single_cbar and cols > 0:
         pos_left = axes[0, 0].get_position()
         pos_right = axes[0, -1].get_position()
         visual_center_x = (pos_left.x0 + pos_right.x1) / 2
-        fig.suptitle(f"Variable: {var_name}", x=visual_center_x, y=1.02, fontsize=18)
+        fig.suptitle(f"{var_name}", x=visual_center_x, y=1.02, fontsize=24, fontweight='bold')
     else:
-        fig.suptitle(f"Variable: {var_name}", y=1.02, fontsize=18)
+        fig.suptitle(f"{var_name}", y=1.02, fontsize=24, fontweight='bold')
     
-    # Save
     os.makedirs(os.path.dirname(outpath) or ".", exist_ok=True)
     plt.savefig(outpath, bbox_inches='tight', dpi=200)
     plt.close(fig)
@@ -252,6 +218,10 @@ def main():
     p.add_argument("--latitude", type=float, nargs=2, help="Lat range (e.g. 20 50)")
     p.add_argument("--longitude", type=float, nargs=2, help="Lon range (e.g. 100 140)")
     p.add_argument("--map", action="append", default=[], help="Map vars: --map surf_2t=2t")
+    
+    # ### NEW ADDITION 1: Add argument for Title Mapping ###
+    p.add_argument("--title_map", action="append", default=[], help="Map var names to titles: --title_map surf_2t='Surface Temp'")
+    
     p.add_argument("--robust", action="store_true", help="Use 2nd/98th percentile for scaling.")
     
     args = p.parse_args()
@@ -259,16 +229,21 @@ def main():
     # 1. Load Manifest
     with open(args.manifest, 'r') as f:
         manifest = json.load(f)
-    
-    # Sort manifest by hour to ensure chronological order in plot
     manifest.sort(key=lambda x: x.get('hour', 0))
 
-    # Parse variable mapping
-    mapping = {}
+    # Parse variable mapping (for data loading)
+    data_mapping = {}
     for m in args.map:
         if "=" in m:
             k, v = m.split("=", 1)
-            mapping[k.strip()] = v.strip()
+            data_mapping[k.strip()] = v.strip()
+
+    # ### NEW ADDITION 2: Parse Title Mapping (for display) ###
+    title_mapping = {}
+    for m in args.title_map:
+        if "=" in m:
+            k, v = m.split("=", 1)
+            title_mapping[k.strip()] = v.strip()
 
     lat_r = args.latitude
     lon_r = args.longitude
@@ -277,17 +252,14 @@ def main():
     for var_token in args.vars:
         print(f"--- Processing {var_token} ---")
         base_var, lev = parse_var_and_level(var_token)
-        era_var = mapping.get(base_var, base_var)
+        era_var = data_mapping.get(base_var, base_var)
 
         col_data = []
-        all_vals = []   # To calculate global vmin/vmax
-        all_diffs = []  # To calculate global diff scale
+        all_vals = []   
+        all_diffs = [] 
 
-        # Loop through timestamps in manifest
         for entry in manifest:
             hour = entry.get('hour', '?')
-            
-            # Open files safely
             try:
                 ds_p = standardize_latlon(xr.open_dataset(entry['pred']))
                 ds_e = open_era5_merged(entry['era_upper'], entry['era_sfc'])
@@ -296,7 +268,6 @@ def main():
                 col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
                 continue
 
-            # Check variables
             if base_var not in ds_p:
                 print(f"[WARN] '{base_var}' missing in Pred file for T+{hour}h")
                 col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
@@ -306,7 +277,6 @@ def main():
                 col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
                 continue
             
-            # Select Data
             da_p = get_first_time(ds_p[base_var])
             da_e = get_first_time(ds_e[era_var])
 
@@ -318,7 +288,6 @@ def main():
                 col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
                 continue
 
-            # Regrid & Diff
             da_p_reg = regrid_to_era(da_p, da_e)
             diff = da_p_reg - da_e
 
@@ -333,7 +302,6 @@ def main():
             all_vals.append(da_p_reg.values.ravel())
             all_diffs.append(diff.values.ravel())
 
-        # 3. Global Scaling & Plot
         if not all_vals:
             print(f"No valid data found for {var_token}. Skipping.")
             continue
@@ -344,9 +312,8 @@ def main():
         vmin, vmax = finite_minmax(big_v, robust=args.robust)
         dvmin, dvmax = symmetric_minmax(big_d, robust=args.robust)
 
-        # Smart Colormap Selection
         if "surf" in base_var:
-            cmap = "inferno" # or 'magma', 'viridis'
+            cmap = "inferno" 
         elif "atmos" in base_var:
             cmap = "plasma"
         else:
@@ -354,10 +321,14 @@ def main():
 
         out_filename = f"{args.output_prefix}_{var_token}.pdf"
         
+        # ### NEW ADDITION 3: Determine Display Name ###
+        # If the user provided a title map, use it. Otherwise use the var_token.
+        display_name = title_mapping.get(var_token, var_token)
+
         plot_grid(
             col_data, 
-            var_name=var_token, 
-            outpath=out_filename, 
+            var_name=display_name, # Pass the pretty name here
+            outpath=out_filename,  # Keep the technical name here for the file
             vmin=vmin, vmax=vmax, 
             dvmin=dvmin, dvmax=dvmax, 
             cmap=cmap,

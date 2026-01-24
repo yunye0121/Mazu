@@ -10,7 +10,7 @@ import random
 from collections import deque
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
 from accelerate import Accelerator
@@ -43,7 +43,7 @@ logger = get_logger(__name__, log_level = "INFO")
 def batch_to_device(batch_obj, device):
     """
     Recursively moves an Aurora Batch to the specified device (cpu or cuda).
-    Also detaches tensors to ensure no gradients are stored in the buffer.
+    Detaches tensors to ensure no gradients are stored in the buffer.
     """
     def move_dict(d):
         if d is None: return None
@@ -54,13 +54,13 @@ def batch_to_device(batch_obj, device):
         surf_vars = move_dict(batch_obj.surf_vars),
         atmos_vars = move_dict(batch_obj.atmos_vars),
         static_vars = move_dict(batch_obj.static_vars),
-        metadata = batch_obj.metadata # Metadata is just numbers/tuples
+        metadata = batch_obj.metadata 
     )
 
 def construct_next_input(current_input_batch, prediction_batch, lead_time_hours):
     """
-    Implements the sliding window logic.
-    It takes the PREDICTION and makes it the NEW INPUT for the next step.
+    Implements the sliding window logic for Aurora.
+    Takes the Prediction (Surf/Atmos) + Old Static + New Time Metadata.
     """
     # 1. Update Time Metadata
     new_metadata = Metadata(
@@ -71,132 +71,74 @@ def construct_next_input(current_input_batch, prediction_batch, lead_time_hours)
     )
     
     # 2. Create Next Batch
-    # Uses the prediction as the new atmospheric/surface state
     next_input = Batch(
         surf_vars = prediction_batch.surf_vars,
         atmos_vars = prediction_batch.atmos_vars,
-        static_vars = current_input_batch.static_vars, # Static vars persist
+        static_vars = current_input_batch.static_vars, 
         metadata = new_metadata
     )
     return next_input
 
-def collate_replay_batch(dataset_items, dataset_obj, lead_time):
+def slice_timeaxis(labels):
     """
-    Manually stacks list of (input, label, date) tuples into an Aurora Batch.
-    Used for the Replay Step when we fetch random rows from the dataset.
+    Splits a batch with shape [B, Time, Lat, Lon] into a dictionary of time steps.
+    Returns: {0: {vars...}, 1: {vars...}}
     """
-    if not dataset_items: return None
-
-    # Unzip the list of tuples: [(inputs, labels, dates), ...]
-    inputs_list, labels_list, dates_list = zip(*dataset_items)
+    # Get the time dimension length from the first available tensor
+    first_var = next(iter(next(iter(labels.values())).values()))
+    timeaxis_length = first_var.shape[1]
     
-    # Helper to stack dictionary of tensors
-    def stack_dict(dict_list):
-        if not dict_list: return {}
-        keys = dict_list[0].keys()
-        return {k: torch.stack([d[k] for d in dict_list]) for k in keys}
-
-    # Stack Labels (We only strictly need labels for the Replay Step as Ground Truth)
-    lb_surf = stack_dict([item['surf_vars'] for item in labels_list])
-    lb_atmos = stack_dict([item['atmos_vars'] for item in labels_list])
-    
-    # Process Dates
-    flat_dates = []
-    for d in dates_list:
-        # If dates is a list (window), take the last one which implies the target time base
-        flat_dates.append(d[-1] if isinstance(d, (list, tuple)) else d)
-
-    lat, lon = dataset_obj.get_latitude_longitude()
-    levels = dataset_obj.get_levels()
-    static = dataset_obj.get_static_vars_ds()
-    
-    # We construct the LABEL batch (the Ground Truth for the Replay Step)
-    _label = Batch(
-        surf_vars=lb_surf,
-        atmos_vars=lb_atmos,
-        static_vars=static['static_vars'],
-        metadata=Metadata(
-            lat=lat, lon=lon, 
-            time=tuple(pd.Timestamp(d) + pd.Timedelta(hours=lead_time) for d in flat_dates), 
-            atmos_levels=levels
-        )
-    )
-    return _label
+    n_g = {}
+    for i in range(timeaxis_length):
+        n_g[i] = {}
+        for var_type, var_dict in labels.items():
+            n_g[i][var_type] = {}
+            for var_name, tensor in var_dict.items():
+                # Slice: keep dims but restrict time to i
+                n_g[i][var_type][var_name] = tensor[:, i : i + 1]
+    return n_g
 
 # ==========================================
-# 2. New Classes for Replay Mechanism
+# 2. Optimized Replay Buffer (RAM Only)
 # ==========================================
 
 class ReplayBuffer:
     """
-    Optimized Buffer: Stores (Input_Batch, Target_Batch) tuples in CPU RAM.
-    This acts as a Cache, paying the disk I/O cost only once during 'put'.
+    Pure RAM Replay Buffer.
+    Since we load T+2 via rollout_step=2, we don't need disk reading logic here.
     """
     def __init__(self, max_size=200):
         self.buffer = deque(maxlen=max_size)
 
-    def put(self, prediction_batch, target_indices, dataset, lead_time):
+    def put(self, prediction_input_batch, ground_truth_target_batch):
         """
-        1. Takes the Model Prediction (on GPU).
-        2. Fetches the corresponding Ground Truth from the Dataset (Disk Read).
-        3. Moves both to CPU and stores them.
+        Stores a pair of (Input, Target) for future training.
+        Input: The model's prediction from step T (which becomes input for T+1).
+        Target: The actual ground truth for step T+1.
         """
-        # A. Fetch Ground Truth Target immediately (The Disk Cost happens here)
-        valid_items = []
-        for idx in target_indices:
-            if idx < len(dataset):
-                valid_items.append(dataset[idx])
-        
-        if not valid_items:
-            return
+        # Move everything to CPU to save GPU VRAM
+        input_cpu = batch_to_device(prediction_input_batch, "cpu")
+        target_cpu = batch_to_device(ground_truth_target_batch, "cpu")
 
-        # B. Collate raw dataset items into an Aurora Batch (Target)
-        target_batch = collate_replay_batch(valid_items, dataset, lead_time)
-        
-        # C. Move everything to CPU to save GPU VRAM
-        pred_cpu = batch_to_device(prediction_batch, "cpu")
-        target_cpu = batch_to_device(target_batch, "cpu")
-
-        # D. Store the pair
-        self.buffer.append((pred_cpu, target_cpu, target_indices))
+        self.buffer.append((input_cpu, target_cpu))
 
     def sample(self):
-        # Returns (Input_Batch_CPU, Target_Batch_CPU, Target_Indices)
+        # Returns (Input_Batch_CPU, Target_Batch_CPU)
+        if len(self.buffer) == 0:
+            return None
         return random.choice(self.buffer)
 
     def __len__(self):
         return len(self.buffer)
-
-class IndexedDataset(Dataset):
-    """
-    Wraps your existing dataset to return the INDEX along with data.
-    Essential for identifying 'Time T' so we can find 'Time T+1' even when shuffling.
-    """
-    def __init__(self, dataset):
-        self.dataset = dataset
-        
-    def __getitem__(self, index):
-        data = self.dataset[index]
-        return data, index
-
-    def __len__(self):
-        return len(self.dataset)
-    
-    # Pass-through methods for Aurora dataset attributes
-    def get_latitude_longitude(self):
-        return self.dataset.get_latitude_longitude()
-    def get_levels(self):
-        return self.dataset.get_levels()
-    def get_static_vars_ds(self):
-        return self.dataset.get_static_vars_ds()
 
 # ==========================================
 # 3. Main Logic
 # ==========================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description = "Aurora Training Script (HF Style)")
+    parser = argparse.ArgumentParser(description = "Aurora Training Script")
     
+    # Standard Aurora Args
     parser.add_argument("--data_root_dir", type = str, required = True)
     parser.add_argument("--output_dir", type = str, default = "AuroraTW")
     parser.add_argument("--seed", type = int, default = 42)
@@ -218,7 +160,10 @@ def parse_args():
     parser.add_argument("--longitude", type = float, nargs = 2, required = True)
     parser.add_argument("--lead_time", type = int, default = 0)
     parser.add_argument("--input_time_window", type = int, required = True)
-    parser.add_argument("--rollout_step", type = int, required = True)
+    
+    # CRITICAL: We need rollout_step >= 2 for this replay method
+    parser.add_argument("--rollout_step", type = int, required = True, help="Must be >= 2 for replay buffer")
+
     parser.add_argument("--epochs", type = int, default = 5)
     parser.add_argument("--lr", type = float, default = 1e-3)
     parser.add_argument("--weight_decay", type = float, default = 1e-3)
@@ -236,7 +181,7 @@ def parse_args():
     parser.add_argument("--mixed_precision", type = str, default = None, choices = ["no", "fp16", "bf16"])
     parser.add_argument("--wandb_name", type = str, default = None)
     
-    # --- FengWu Replay Args ---
+    # --- Replay Buffer Args ---
     parser.add_argument("--replay_buffer_size", type=int, default=200, help="Size of replay buffer")
     parser.add_argument("--finetune_rate", type=int, default=5, help="Number of replay steps per real step")
     parser.add_argument("--replay_start_step", type=int, default=100, help="Global step to start replay mechanism")
@@ -260,7 +205,8 @@ def create_model(args):
     return model
 
 def create_dataset(args, split):
-    # Select dataset class based on split/args
+    # Standard dataset creation
+    # Ensure rollout_step is passed correctly
     if split == "train":
         ds = ERA5TWDatasetforAurora(
                 data_root_dir = args.data_root_dir,
@@ -274,11 +220,8 @@ def create_dataset(args, split):
                 longitude = args.longitude,
                 lead_time = args.lead_time,
                 input_time_window = args.input_time_window,
-                rollout_step = args.rollout_step,
+                rollout_step = args.rollout_step, 
             )
-        # CRITICAL: Wrap train dataset to return indices for Replay Logic
-        ds = IndexedDataset(ds)
-        
     elif split == "val":
         ds = ERA5TWDatasetforAurora(
                 data_root_dir = args.data_root_dir,
@@ -305,22 +248,26 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
     total_train_loss = 0.0
     total_train_samples = 0
 
-    # We need access to the underlying dataset to fetch by index
-    # dataloader.dataset is IndexedDataset -> .dataset is ERA5TWDataset
-    real_dataset = dataloader.dataset.dataset 
-    latitude, longitude = real_dataset.get_latitude_longitude()
-    levels = real_dataset.get_levels()
-    static_data = real_dataset.get_static_vars_ds()
+    dataset = dataloader.dataset
+    latitude, longitude = dataset.get_latitude_longitude()
+    levels = dataset.get_levels()
+    static_data = dataset.get_static_vars_ds()
 
     pbar = tqdm(dataloader, disable = not accelerator.is_local_main_process, desc = f"train_epoch: {epoch}")
 
-    for batch_data, batch_indices in pbar:
-        # batch_data is (train_input, train_label, train_dates)
-        train_input, train_label, train_dates = batch_data
+    for batch in pbar:
+        # train_label contains [Batch, Time=RolloutStep, Lat, Lon]
+        train_input, train_label, train_dates = batch
 
-        # --- 1. Standard Training Step ---
+        # Slice the label into steps: 0 -> T+1, 1 -> T+2
+        _label_slices = slice_timeaxis(train_label)
+
+        # ==========================================================
+        # 1. Main Training Step (T -> T+1)
+        # ==========================================================
         optimizer.zero_grad()
         with accelerator.autocast():
+            # Prepare Input (Time T)
             _input = Batch(
                 surf_vars = train_input["surf_vars"],
                 atmos_vars = train_input["atmos_vars"],
@@ -331,9 +278,11 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
                     atmos_levels = levels,
                 ),
             )
-            _label = Batch(
-                surf_vars = train_label['surf_vars'],
-                atmos_vars = train_label['atmos_vars'],
+            
+            # Prepare Target (Time T+1) -> Index 0 from slices
+            _label_t1 = Batch(
+                surf_vars = _label_slices[0]['surf_vars'],
+                atmos_vars = _label_slices[0]['atmos_vars'],
                 static_vars = static_data["static_vars"],
                 metadata = Metadata(
                     lat = latitude, lon = longitude,
@@ -342,10 +291,13 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
                 ),
             )
 
-            _pred = model(_input)
+            # Forward
+            _pred_t1 = model(_input)
+            
+            # Loss
             loss_dict = criterion(
-                _pred.normalise(surf_stats = _model.surf_stats),
-                _label.normalise(surf_stats = _model.surf_stats),
+                _pred_t1.normalise(surf_stats = _model.surf_stats),
+                _label_t1.normalise(surf_stats = _model.surf_stats),
             )
             loss = loss_dict["all_vars"]
 
@@ -361,44 +313,51 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
         total_train_samples += gather_loss.shape[0]
         step_loss = gather_loss.mean().item()
 
-        # --- 2. Store in Replay Buffer (Updated) ---
-        # Calculate next indices (Assume sequential dataset: next is idx+1)
-        next_indices = [(idx.item() + 1) for idx in batch_indices]
-        
-        # Create synthetic input (Pred as Input)
-        next_input_synthetic = construct_next_input(_input, _pred, args.lead_time)
+        # ==========================================================
+        # 2. Store in Replay Buffer (Zero-Cost Store)
+        # ==========================================================
+        # If we have Step 2 data (T+2), use it to populate the buffer
+        if 1 in _label_slices:
+            # Construct Input for next step: (Model Prediction T+1) + (Time T+1)
+            # This is the "Synthetic History" input
+            next_input_synthetic = construct_next_input(_input, _pred_t1, args.lead_time)
 
-        # Check validity and PUT into buffer
-        # This triggers the "One-Time Disk Read" for the target data
-        if all(idx < len(real_dataset) for idx in next_indices):
-            replay_buffer.put(
-                prediction_batch=next_input_synthetic,
-                target_indices=next_indices,
-                dataset=real_dataset,
-                lead_time=args.lead_time
+            # Construct Target for next step: (Ground Truth T+2) -> Index 1 from slices
+            # We already loaded this from disk! No extra cost.
+            _label_t2 = Batch(
+                surf_vars = _label_slices[1]['surf_vars'],
+                atmos_vars = _label_slices[1]['atmos_vars'],
+                static_vars = static_data["static_vars"],
+                metadata = Metadata(
+                    lat = latitude, lon = longitude,
+                    time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time * 2), train_dates)),
+                    atmos_levels = levels,
+                ),
             )
-
-        # --- 3. Replay Fine-tuning (Optimized) ---
-        if train_global_step > args.replay_start_step and len(replay_buffer) > 0:
             
-            # 
+            # Put into buffer
+            replay_buffer.put(next_input_synthetic, _label_t2)
 
-            if accelerator.is_main_process and train_global_step % 100 == 0:
-                print(f"[DEBUG] Step {train_global_step}: Replay Buffer Size: {len(replay_buffer)}")
+            if train_global_step % 100 == 0 and accelerator.is_main_process:
+                print(f"[DEBUG] Replay Buffer Size: {len(replay_buffer)}")
 
+        # ==========================================================
+        # 3. Replay Fine-tuning Step
+        # ==========================================================
+        if train_global_step > args.replay_start_step:
             for _ in range(args.finetune_rate):
-                # A. Sample from Buffer (Direct Tensor Fetch from RAM)
-                r_input_cpu, r_label_cpu, r_current_indices = replay_buffer.sample()
+                sample_data = replay_buffer.sample()
+                if sample_data is None: break # Buffer empty
 
-                # B. Move to GPU for training
+                r_input_cpu, r_label_cpu = sample_data
+                
+                # Move to GPU
                 r_input = batch_to_device(r_input_cpu, accelerator.device)
                 r_label = batch_to_device(r_label_cpu, accelerator.device)
 
-                # C. Replay Train Step
                 optimizer.zero_grad()
                 with accelerator.autocast():
-                    r_pred = model(r_input) # Predict based on synthetic history
-                    
+                    r_pred = model(r_input)
                     r_loss_dict = criterion(
                         r_pred.normalise(surf_stats = _model.surf_stats),
                         r_label.normalise(surf_stats = _model.surf_stats)
@@ -410,23 +369,9 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
                     accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-                # D. Recursive Push (Deep Rollout)
-                # We predicted T+X, now push T+X so we can train on T+X+1 later
-                r_next_indices = [i + 1 for i in r_current_indices]
-                
-                if all(i < len(real_dataset) for i in r_next_indices):
-                    r_next_input = construct_next_input(r_input, r_pred, args.lead_time)
-                    
-                    # Store result of Replay for next-level replay
-                    replay_buffer.put(
-                        prediction_batch=r_next_input,
-                        target_indices=r_next_indices,
-                        dataset=real_dataset,
-                        lead_time=args.lead_time
-                    )
-        
-        # --- End Replay ---
-
+        # ==========================================================
+        # Logging & End of Step
+        # ==========================================================
         if accelerator.is_main_process:
             pbar.set_postfix({"loss": f"{step_loss:.6f}"})
             accelerator.log({
@@ -444,13 +389,12 @@ def train_epoch(args, model, dataloader, optimizer, scheduler, criterion, accele
     return train_epoch_loss, train_global_step
 
 def val_epoch(args, model, dataloader, criterion, accelerator, epoch, val_global_step):
-    # Standard Validation Loop (Unchanged)
+    # Standard Validation (Unchanged)
     _model = accelerator.unwrap_model(model)
     model.eval()
     total_val_loss = 0.0
     total_val_samples = 0
     
-    # Access dataset directly since Val is not wrapped in IndexedDataset
     dataset = dataloader.dataset
     latitude, longitude = dataset.get_latitude_longitude()
     levels = dataset.get_levels()
@@ -461,6 +405,11 @@ def val_epoch(args, model, dataloader, criterion, accelerator, epoch, val_global
     with torch.inference_mode():
         for batch in pbar:
             val_input, val_label, val_dates = batch
+            
+            # Val likely also has rollout labels if using same dataset class
+            # We just take the first step for standard validation metric, or loop if you want average
+            _label_slices = slice_timeaxis(val_label)
+            
             with accelerator.autocast():
                 _input = Batch(
                     surf_vars = val_input["surf_vars"],
@@ -472,9 +421,11 @@ def val_epoch(args, model, dataloader, criterion, accelerator, epoch, val_global
                         atmos_levels = levels,
                     ),
                 )
+                
+                # Validation against first step (T+1)
                 _label = Batch(
-                    surf_vars = val_label['surf_vars'],
-                    atmos_vars = val_label['atmos_vars'],
+                    surf_vars = _label_slices[0]['surf_vars'],
+                    atmos_vars = _label_slices[0]['atmos_vars'],
                     static_vars = static_data["static_vars"],
                     metadata = Metadata(
                         lat = latitude, lon = longitude,
@@ -505,6 +456,7 @@ def val_epoch(args, model, dataloader, criterion, accelerator, epoch, val_global
 
     return val_epoch_loss, val_global_step
 
+# ... [Save Checkpoint functions remain identical to your provided code] ...
 def save_checkpoint_by_epoch(args, accelerator, output_dir, epoch):
     output_dir = Path(output_dir)
     if args.checkpointing_epochs > 0 and epoch % args.checkpointing_epochs == 0:
@@ -536,6 +488,11 @@ def save_checkpoint_best_by_val_loss(args, accelerator, output_dir, epoch, train
 
 def main():
     args = parse_args()
+    
+    # Assert Rollout Step is sufficient for replay
+    if args.rollout_step < 2:
+        logger.warning(f"Rollout step is {args.rollout_step}. Replay buffer requires at least 2 steps (T+1 and T+2). Replay will be disabled.")
+    
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
     logging_dir = output_dir / args.logging_dir
@@ -570,17 +527,22 @@ def main():
 
     model = create_model(args)
     
-    # Dataset Creation (Now wrapped in IndexedDataset inside function)
+    # Dataset Creation
     train_dataset = create_dataset(args, "train")
     val_dataset = create_dataset(args, "val")
 
+    # OPTIMIZATION: Use persistent_workers and prefetch_factor
     train_loader = DataLoader(
         train_dataset, batch_size = args.train_batch_size, shuffle = True,
         num_workers = args.num_workers, pin_memory = True,
+        persistent_workers = True, 
+        prefetch_factor = 2
     )
     val_loader = DataLoader(
         val_dataset, batch_size = args.val_batch_size, shuffle = False,
         num_workers = args.num_workers, pin_memory = True,
+        persistent_workers = True,
+        prefetch_factor = 2
     )
 
     optimizer = AdamW(model.parameters(), lr = args.lr, weight_decay = args.weight_decay)

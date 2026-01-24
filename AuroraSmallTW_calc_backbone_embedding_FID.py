@@ -190,6 +190,7 @@ def main():
     feats_real = [] # ERA5
     feats_fake = [] # Aurora
 
+    print(f"Using the prediction: {args.Aurora_input_dir}")
     print(f"Extracting Swin3D Backbone features for forecast hours: {args.forecast_hour}")
 
     with torch.no_grad():

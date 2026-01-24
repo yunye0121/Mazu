@@ -454,7 +454,7 @@ def accumulate_pred_spectrum_upper(var_pred: str, level: int, pred_dir: str, val
 # Panel plotting (2xN) with bottom legend + aligned colors
 # ============================================================
 
-def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_format, suptitle=None):
+# def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_format, suptitle=None):
     N = len(panels)
     if N == 0:
         raise ValueError("No panels specified.")
@@ -602,6 +602,690 @@ def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_fo
         fig.savefig(outpath, dpi=300)  # raster
     plt.close(fig)
     print(f"[saved] panel: {outpath}")
+
+# def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_format, suptitle=None):
+    N = len(panels)
+    if N == 0:
+        raise ValueError("No panels specified.")
+
+    # ---- Fixed color mapping for models (global) ----
+    base_colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not base_colors:
+        base_colors = ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+    ccycler = cycle(base_colors)
+
+    model_colors = {}
+    for model_name, _ in models:
+        model_colors[model_name] = next(ccycler)
+
+    era5_color = "black"
+
+    # ---- Figure and axes ----
+    fig, axes = plt.subplots(2, N, figsize=(4.3 * N, 7.2), squeeze=False)
+
+    band = f"lat {args.lat_min}–{args.lat_max}°" if args.use_lat_band else "all lat"
+    sect = f" lon {args.lon_min}–{args.lon_max}°" if args.use_lon_sector else "all lon"
+    region_txt = f"{band};{sect}"
+
+    legend_handles = None
+    legend_labels = None
+
+    for j, p in enumerate(panels):
+        ax_abs = axes[0, j]
+        ax_rat = axes[1, j]
+
+        domain = p["domain"]
+        v_ref  = p["ref"]
+        v_pred = p["pred"]
+        lvl    = p["level"]
+        label  = p["label"]
+
+        # --- REF ---
+        if domain == "sfc":
+            _, E_ref, n_ref = accumulate_ref_spectrum_surface(v_ref, valid_hours, args)
+        else:
+            _, E_ref, n_ref = accumulate_ref_spectrum_upper(v_ref, lvl, valid_hours, args)
+
+        if n_ref == 0 or E_ref.size == 0:
+            ax_abs.text(0.5, 0.5, f"{label}\n(REF missing)", ha="center", va="center")
+            ax_abs.axis("off")
+            ax_rat.axis("off")
+            continue
+
+        m_ref = np.arange(len(E_ref))
+        mask = m_ref >= 1
+
+        # Top: ERA5 in fixed color
+        ax_abs.loglog(
+            m_ref[mask], E_ref[mask],
+            label="ERA5",
+            linewidth=2.7,
+            color=era5_color
+        )
+
+        any_model = False
+
+        for model_name, model_dir in models:
+            # Always use same color for this model on BOTH axes
+            color = model_colors[model_name]
+
+            if domain == "sfc":
+                _, E_p, n_p = accumulate_pred_spectrum_surface(v_pred, model_dir, valid_hours, args)
+            else:
+                _, E_p, n_p = accumulate_pred_spectrum_upper(v_pred, lvl, model_dir, valid_hours, args)
+
+            if n_p == 0 or E_p.size == 0:
+                continue
+
+            # =========================================================
+            # NEW: Calculate Integrated Error for Label
+            # =========================================================
+            L = min(len(E_ref), len(E_p))
+            m = np.arange(L)
+            
+            # Slice arrays to common length
+            Eref_c = E_ref[:L]
+            Ep_c   = E_p[:L]
+
+            # Calculate error on m >= 1 (ignore zonal mean)
+            valid_m = m >= 1
+            if np.any(valid_m):
+                diff = np.abs(Ep_c[valid_m] - Eref_c[valid_m])
+                total_ref = np.sum(Eref_c[valid_m])
+                if total_ref > 0:
+                    err_pct = (np.sum(diff) / total_ref) * 100.0
+                    label_str = f"{model_name} ({err_pct:.1f}%)"
+                else:
+                    label_str = model_name
+            else:
+                label_str = model_name
+            # =========================================================
+
+            any_model = True
+
+            # Top: abs spectrum (use modified label)
+            ax_abs.loglog(
+                m[valid_m], Ep_c[valid_m],
+                label=label_str,
+                linewidth=1.5,
+                color=color
+            )
+
+            # Bottom: ratio with SAME color
+            ratio = Ep_c / (Eref_c + 1e-12)
+            ax_rat.semilogx(
+                m[valid_m], ratio[valid_m],
+                label=model_name, # ratio plot doesn't need error in label
+                linewidth=1.5,
+                color=color
+            )
+
+        # formatting
+        ax_abs.set_title(label)
+        ax_abs.grid(True, which="both", ls="--", alpha=0.4)
+        ax_abs.set_xlabel("m")
+        if j == 0:
+            ax_abs.set_ylabel("Zonal spectral power")
+
+        if any_model:
+            ax_rat.axhline(1.0, linestyle="--", linewidth=1.0, color="0.3")
+            ax_rat.grid(True, which="both", ls="--", alpha=0.4)
+            ax_rat.set_xlabel("m")
+            if j == 0:
+                ax_rat.set_ylabel("E_pred / E_ERA5")
+        else:
+            ax_rat.text(0.5, 0.5, "No model overlap", ha="center", va="center")
+            ax_rat.axis("off")
+
+        # capture handles once (ERA5 + all models) from first working column
+        # We grab handles from ax_abs to ensure we get the "Model (X%)" labels
+        if legend_handles is None:
+            h, l = ax_abs.get_legend_handles_labels()
+            if h and l:
+                legend_handles, legend_labels = h, l
+
+    if suptitle is None:
+        suptitle = f"Zonal spectra (top) and ratio (bottom), lead={args.lead}h | {args.start} → {args.end}\nRegion: {region_txt}"
+    fig.suptitle(suptitle, y=0.98, fontsize=12)
+
+    # layout leaving room for legend
+    fig.tight_layout(rect=[0, 0.12, 1, 0.94])
+
+    # global legend at bottom
+    if legend_handles is not None and legend_labels is not None:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            ncol=len(legend_labels),
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.02),
+            fontsize=10,
+        )
+
+    outpath = Path(outdir) / f"{panel_base}.{fig_format}"
+    if outpath.suffix.lower() == ".pdf":
+        fig.savefig(outpath)           # vector
+    else:
+        fig.savefig(outpath, dpi=300)  # raster
+    plt.close(fig)
+    print(f"[saved] panel: {outpath}")
+
+# def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_format, suptitle=None):
+    N = len(panels)
+    if N == 0:
+        raise ValueError("No panels specified.")
+
+    # ---- Fixed color mapping for models (global) ----
+    base_colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not base_colors:
+        base_colors = ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+    ccycler = cycle(base_colors)
+
+    model_colors = {}
+    for model_name, _ in models:
+        model_colors[model_name] = next(ccycler)
+
+    era5_color = "black"
+
+    # ---- Figure and axes ----
+    fig, axes = plt.subplots(2, N, figsize=(4.3 * N, 7.2), squeeze=False)
+
+    band = f"lat {args.lat_min}–{args.lat_max}°" if args.use_lat_band else "all lat"
+    sect = f" lon {args.lon_min}–{args.lon_max}°" if args.use_lon_sector else "all lon"
+    region_txt = f"{band};{sect}"
+
+    legend_handles = None
+    legend_labels = None
+
+    for j, p in enumerate(panels):
+        ax_abs = axes[0, j]
+        ax_rat = axes[1, j]
+
+        domain = p["domain"]
+        v_ref  = p["ref"]
+        v_pred = p["pred"]
+        lvl    = p["level"]
+        label  = p["label"]
+
+        # --- REF ---
+        if domain == "sfc":
+            _, E_ref, n_ref = accumulate_ref_spectrum_surface(v_ref, valid_hours, args)
+        else:
+            _, E_ref, n_ref = accumulate_ref_spectrum_upper(v_ref, lvl, valid_hours, args)
+
+        if n_ref == 0 or E_ref.size == 0:
+            ax_abs.text(0.5, 0.5, f"{label}\n(REF missing)", ha="center", va="center")
+            ax_abs.axis("off")
+            ax_rat.axis("off")
+            continue
+
+        m_ref = np.arange(len(E_ref))
+        mask = m_ref >= 1
+
+        # Plot ERA5 (Reference)
+        ax_abs.loglog(
+            m_ref[mask], E_ref[mask],
+            label="ERA5",
+            linewidth=2.7,
+            color=era5_color
+        )
+
+        any_model = False
+        stats_lines = []  # List to hold error strings for this specific panel
+
+        for model_name, model_dir in models:
+            color = model_colors[model_name]
+
+            if domain == "sfc":
+                _, E_p, n_p = accumulate_pred_spectrum_surface(v_pred, model_dir, valid_hours, args)
+            else:
+                _, E_p, n_p = accumulate_pred_spectrum_upper(v_pred, lvl, model_dir, valid_hours, args)
+
+            if n_p == 0 or E_p.size == 0:
+                continue
+
+            # Align lengths
+            L = min(len(E_ref), len(E_p))
+            m = np.arange(L)
+            
+            # Slice arrays
+            Eref_c = E_ref[:L]
+            Ep_c   = E_p[:L]
+            valid_m = m >= 1
+
+            # --- Calculate Variable-Wise Error ---
+            if np.any(valid_m):
+                diff = np.abs(Ep_c[valid_m] - Eref_c[valid_m])
+                total_ref = np.sum(Eref_c[valid_m])
+                if total_ref > 0:
+                    err_pct = (np.sum(diff) / total_ref) * 100.0
+                    # Append to stats list: "GraphCast: 4.2%"
+                    stats_lines.append(f"{model_name}: {err_pct:.1f}%")
+
+            any_model = True
+
+            # Top: abs spectrum (Legend remains clean)
+            ax_abs.loglog(
+                m[valid_m], Ep_c[valid_m],
+                label=model_name,
+                linewidth=1.5,
+                color=color
+            )
+
+            # Bottom: ratio
+            ratio = Ep_c / (Eref_c + 1e-12)
+            ax_rat.semilogx(
+                m[valid_m], ratio[valid_m],
+                label=model_name,
+                linewidth=1.5,
+                color=color
+            )
+
+        # --- Formatting & Stats Box ---
+        ax_abs.set_title(label)
+        ax_abs.grid(True, which="both", ls="--", alpha=0.4)
+        ax_abs.set_xlabel("m")
+        if j == 0:
+            ax_abs.set_ylabel("Zonal spectral power")
+
+        # Create the Text Box for this variable
+        if stats_lines:
+            # Join lines: "Diff w.r.t ERA5:\nModelA: 1.2%\nModelB: 3.4%"
+            stats_text = "Diff (NIAE):\n" + "\n".join(stats_lines)
+            
+            # Place in top-right (usually empty in log-log spectral plots)
+            props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+            ax_abs.text(0.95, 0.95, stats_text, transform=ax_abs.transAxes,
+                        fontsize=9, verticalalignment='top', horizontalalignment='right',
+                        bbox=props)
+
+        if any_model:
+            ax_rat.axhline(1.0, linestyle="--", linewidth=1.0, color="0.3")
+            ax_rat.grid(True, which="both", ls="--", alpha=0.4)
+            ax_rat.set_xlabel("m")
+            if j == 0:
+                ax_rat.set_ylabel("E_pred / E_ERA5")
+        else:
+            ax_rat.text(0.5, 0.5, "No model overlap", ha="center", va="center")
+            ax_rat.axis("off")
+
+        # Global Legend Handles (Grab once)
+        if legend_handles is None:
+            h, l = ax_abs.get_legend_handles_labels()
+            if h and l:
+                legend_handles, legend_labels = h, l
+
+    if suptitle is None:
+        suptitle = f"Zonal spectra (top) and ratio (bottom), lead={args.lead}h | {args.start} → {args.end}\nRegion: {region_txt}"
+    fig.suptitle(suptitle, y=0.98, fontsize=12)
+
+    # layout leaving room for legend
+    fig.tight_layout(rect=[0, 0.12, 1, 0.94])
+
+    # Global Legend (Bottom)
+    if legend_handles is not None and legend_labels is not None:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            ncol=len(legend_labels),
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.02),
+            fontsize=10,
+        )
+
+    outpath = Path(outdir) / f"{panel_base}.{fig_format}"
+    if outpath.suffix.lower() == ".pdf":
+        fig.savefig(outpath)
+    else:
+        fig.savefig(outpath, dpi=300)
+    plt.close(fig)
+    print(f"[saved] panel: {outpath}")
+
+# def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_format, suptitle=None):
+    N = len(panels)
+    if N == 0:
+        raise ValueError("No panels specified.")
+
+    base_colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not base_colors:
+        base_colors = ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+    ccycler = cycle(base_colors)
+
+    model_colors = {}
+    for model_name, _ in models:
+        model_colors[model_name] = next(ccycler)
+
+    era5_color = "black"
+
+    fig, axes = plt.subplots(2, N, figsize=(4.3 * N, 7.2), squeeze=False)
+
+    band = f"lat {args.lat_min}–{args.lat_max}°" if args.use_lat_band else "all lat"
+    sect = f" lon {args.lon_min}–{args.lon_max}°" if args.use_lon_sector else "all lon"
+    region_txt = f"{band};{sect}"
+
+    legend_handles = None
+    legend_labels = None
+
+    for j, p in enumerate(panels):
+        ax_abs = axes[0, j]
+        ax_rat = axes[1, j]
+
+        domain = p["domain"]
+        v_ref  = p["ref"]
+        v_pred = p["pred"]
+        lvl    = p["level"]
+        label  = p["label"]
+
+        # --- REF ---
+        if domain == "sfc":
+            _, E_ref, n_ref = accumulate_ref_spectrum_surface(v_ref, valid_hours, args)
+        else:
+            _, E_ref, n_ref = accumulate_ref_spectrum_upper(v_ref, lvl, valid_hours, args)
+
+        if n_ref == 0 or E_ref.size == 0:
+            ax_abs.text(0.5, 0.5, f"{label}\n(REF missing)", ha="center", va="center")
+            ax_abs.axis("off")
+            ax_rat.axis("off")
+            continue
+
+        m_ref = np.arange(len(E_ref))
+        mask = m_ref >= 1
+
+        # Plot ERA5
+        ax_abs.loglog(
+            m_ref[mask], E_ref[mask],
+            label="ERA5",
+            linewidth=2.7,
+            color=era5_color
+        )
+
+        any_model = False
+        stats_lines = []
+
+        for model_name, model_dir in models:
+            color = model_colors[model_name]
+
+            if domain == "sfc":
+                _, E_p, n_p = accumulate_pred_spectrum_surface(v_pred, model_dir, valid_hours, args)
+            else:
+                _, E_p, n_p = accumulate_pred_spectrum_upper(v_pred, lvl, model_dir, valid_hours, args)
+
+            if n_p == 0 or E_p.size == 0:
+                continue
+
+            L = min(len(E_ref), len(E_p))
+            m = np.arange(L)
+            
+            Eref_c = E_ref[:L]
+            Ep_c   = E_p[:L]
+            valid_m = m >= 1
+
+            # =========================================================
+            # NEW: Log-Space Error Calculation
+            # "How far is the curve on average in log-log space?"
+            # =========================================================
+            if np.any(valid_m):
+                # Add small epsilon to avoid log(0), though spectra should be > 0
+                log_ref = np.log10(Eref_c[valid_m] + 1e-20)
+                log_pred = np.log10(Ep_c[valid_m] + 1e-20)
+                
+                # Mean Absolute Error in Log10 space
+                # 0.1 means "on average, off by 10^0.1 (factor of ~1.25)"
+                # 0.3 means "on average, off by factor of 2 (10^0.3)"
+                mae_log = np.mean(np.abs(log_pred - log_ref))
+                
+                stats_lines.append(f"{model_name}: {mae_log:.3f} (log)")
+            # =========================================================
+
+            any_model = True
+
+            ax_abs.loglog(
+                m[valid_m], Ep_c[valid_m],
+                label=model_name,
+                linewidth=1.5,
+                color=color
+            )
+
+            ratio = Ep_c / (Eref_c + 1e-12)
+            ax_rat.semilogx(
+                m[valid_m], ratio[valid_m],
+                label=model_name,
+                linewidth=1.5,
+                color=color
+            )
+
+        # Formatting
+        ax_abs.set_title(label)
+        ax_abs.grid(True, which="both", ls="--", alpha=0.4)
+        ax_abs.set_xlabel("m")
+        if j == 0:
+            ax_abs.set_ylabel("Zonal spectral power")
+
+        # --- Stats Box (Log Error) ---
+        if stats_lines:
+            stats_text = "Log-Diff (Shape):\n" + "\n".join(stats_lines)
+            props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+            ax_abs.text(0.95, 0.95, stats_text, transform=ax_abs.transAxes,
+                        fontsize=9, verticalalignment='top', horizontalalignment='right',
+                        bbox=props)
+
+        if any_model:
+            ax_rat.axhline(1.0, linestyle="--", linewidth=1.0, color="0.3")
+            ax_rat.grid(True, which="both", ls="--", alpha=0.4)
+            ax_rat.set_xlabel("m")
+            if j == 0:
+                ax_rat.set_ylabel("E_pred / E_ERA5")
+        else:
+            ax_rat.text(0.5, 0.5, "No model overlap", ha="center", va="center")
+            ax_rat.axis("off")
+
+        if legend_handles is None:
+            h, l = ax_abs.get_legend_handles_labels()
+            if h and l:
+                legend_handles, legend_labels = h, l
+
+    if suptitle is None:
+        suptitle = f"Zonal spectra (top) and ratio (bottom), lead={args.lead}h | {args.start} → {args.end}\nRegion: {region_txt}"
+    fig.suptitle(suptitle, y=0.98, fontsize=12)
+    fig.tight_layout(rect=[0, 0.12, 1, 0.94])
+
+    if legend_handles is not None and legend_labels is not None:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            ncol=len(legend_labels),
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.02),
+            fontsize=10,
+        )
+
+    outpath = Path(outdir) / f"{panel_base}.{fig_format}"
+    if outpath.suffix.lower() == ".pdf":
+        fig.savefig(outpath)
+    else:
+        fig.savefig(outpath, dpi=300)
+    plt.close(fig)
+    print(f"[saved] panel: {outpath}")
+
+def make_panel_2xN(panels, models, valid_hours, args, outdir, panel_base, fig_format, suptitle=None):
+    N = len(panels)
+    if N == 0:
+        raise ValueError("No panels specified.")
+
+    # 1. Setup Colors
+    base_colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not base_colors:
+        base_colors = ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+    ccycler = cycle(base_colors)
+
+    model_colors = {}
+    for model_name, _ in models:
+        model_colors[model_name] = next(ccycler)
+    era5_color = "black"
+
+    # 2. Setup Figure
+    fig, axes = plt.subplots(2, N, figsize=(4.3 * N, 7.2), squeeze=False)
+
+    band = f"lat {args.lat_min}–{args.lat_max}°" if args.use_lat_band else "all lat"
+    sect = f" lon {args.lon_min}–{args.lon_max}°" if args.use_lon_sector else "all lon"
+    region_txt = f"{band};{sect}"
+
+    legend_handles = None
+    legend_labels = None
+
+    # Container for saving results to CSV
+    # Structure: {'Model': [], 'Variable': [], 'Log_Error': [], 'Energy_Err_Pct': []}
+    metrics_data = []
+
+    for j, p in enumerate(panels):
+        ax_abs = axes[0, j]
+        ax_rat = axes[1, j]
+
+        domain = p["domain"]
+        v_ref  = p["ref"]
+        v_pred = p["pred"]
+        lvl    = p["level"]
+        label  = p["label"]
+
+        # --- Load Reference (ERA5) ---
+        if domain == "sfc":
+            _, E_ref, n_ref = accumulate_ref_spectrum_surface(v_ref, valid_hours, args)
+        else:
+            _, E_ref, n_ref = accumulate_ref_spectrum_upper(v_ref, lvl, valid_hours, args)
+
+        if n_ref == 0 or E_ref.size == 0:
+            ax_abs.text(0.5, 0.5, f"{label}\n(REF missing)", ha="center", va="center")
+            ax_abs.axis("off"); ax_rat.axis("off")
+            continue
+
+        m_ref = np.arange(len(E_ref))
+        mask = m_ref >= 1
+
+        # Plot ERA5
+        ax_abs.loglog(m_ref[mask], E_ref[mask], label="ERA5", linewidth=2.7, color=era5_color)
+
+        any_model = False
+        stats_lines = []
+
+        # --- Loop Models ---
+        for model_name, model_dir in models:
+            color = model_colors[model_name]
+
+            if domain == "sfc":
+                _, E_p, n_p = accumulate_pred_spectrum_surface(v_pred, model_dir, valid_hours, args)
+            else:
+                _, E_p, n_p = accumulate_pred_spectrum_upper(v_pred, lvl, model_dir, valid_hours, args)
+
+            if n_p == 0 or E_p.size == 0:
+                continue
+
+            # Align Data
+            L = min(len(E_ref), len(E_p))
+            m = np.arange(L)
+            valid_m = m >= 1
+            
+            Eref_c = E_ref[:L]
+            Ep_c   = E_p[:L]
+
+            # --- METRIC CALCULATION (Log & Linear) ---
+            mae_log = np.nan
+            err_pct = np.nan
+            
+            if np.any(valid_m):
+                # 1. Log-Space Error (Shape) - Best for spectral fairness
+                log_ref = np.log10(Eref_c[valid_m] + 1e-20)
+                log_pred = np.log10(Ep_c[valid_m] + 1e-20)
+                mae_log = np.mean(np.abs(log_pred - log_ref))
+
+                # 2. Linear Energy Error (Percentage) - Good for sanity check
+                diff_lin = np.abs(Ep_c[valid_m] - Eref_c[valid_m])
+                total_ref = np.sum(Eref_c[valid_m])
+                if total_ref > 0:
+                    err_pct = (np.sum(diff_lin) / total_ref) * 100.0
+
+                # Record for CSV
+                metrics_data.append({
+                    "Model": model_name,
+                    "Variable": label,
+                    "Log_Error": mae_log,
+                    "Energy_Err_Pct": err_pct
+                })
+
+                # Record for Plot (Log Error)
+                stats_lines.append(f"{model_name}: {mae_log:.3f}")
+
+            any_model = True
+
+            # Plot Model
+            ax_abs.loglog(m[valid_m], Ep_c[valid_m], label=model_name, linewidth=1.5, color=color)
+            ratio = Ep_c / (Eref_c + 1e-12)
+            ax_rat.semilogx(m[valid_m], ratio[valid_m], label=model_name, linewidth=1.5, color=color)
+
+        # --- Formatting ---
+        ax_abs.set_title(label)
+        ax_abs.grid(True, which="both", ls="--", alpha=0.4)
+        ax_abs.set_xlabel("m")
+        if j == 0: ax_abs.set_ylabel("Zonal spectral power")
+
+        # Stats Box (Log Error only, to keep it clean)
+        if stats_lines:
+            stats_text = "Log-Diff:\n" + "\n".join(stats_lines)
+            props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+            ax_abs.text(0.95, 0.95, stats_text, transform=ax_abs.transAxes,
+                        fontsize=9, verticalalignment='top', horizontalalignment='right',
+                        bbox=props)
+
+        if any_model:
+            ax_rat.axhline(1.0, linestyle="--", linewidth=1.0, color="0.3")
+            ax_rat.grid(True, which="both", ls="--", alpha=0.4)
+            ax_rat.set_xlabel("m")
+            if j == 0: ax_rat.set_ylabel("Ratio")
+        else:
+            ax_rat.axis("off")
+
+        if legend_handles is None:
+            h, l = ax_abs.get_legend_handles_labels()
+            if h and l: legend_handles, legend_labels = h, l
+
+    # 3. Final Figure Layout
+    if suptitle is None:
+        suptitle = f"Zonal spectra (top) and ratio (bottom), lead={args.lead}h | {args.start} → {args.end}\nRegion: {region_txt}"
+    fig.suptitle(suptitle, y=0.98, fontsize=12)
+    fig.tight_layout(rect=[0, 0.12, 1, 0.94])
+
+    if legend_handles and legend_labels:
+        fig.legend(legend_handles, legend_labels, loc="lower center", ncol=len(legend_labels),
+                   frameon=False, bbox_to_anchor=(0.5, 0.02), fontsize=10)
+
+    # 4. Save Figure
+    outpath_fig = Path(outdir) / f"{panel_base}.{fig_format}"
+    if outpath_fig.suffix.lower() == ".pdf":
+        fig.savefig(outpath_fig)
+    else:
+        fig.savefig(outpath_fig, dpi=300)
+    plt.close(fig)
+    print(f"[saved] panel figure: {outpath_fig}")
+
+    # 5. Save Metrics to CSV
+    if metrics_data:
+        df = pd.DataFrame(metrics_data)
+        
+        # Calculate Global Average per Model
+        global_avg = df.groupby("Model")[["Log_Error", "Energy_Err_Pct"]].mean().reset_index()
+        global_avg["Variable"] = "GLOBAL_MEAN"
+        
+        # Combine and Sort
+        df_final = pd.concat([df, global_avg], ignore_index=True)
+        df_final = df_final.sort_values(by=["Model", "Variable"])
+        
+        outpath_csv = Path(outdir) / f"{panel_base}_metrics.csv"
+        df_final.to_csv(outpath_csv, index=False, float_format="%.4f")
+        print(f"[saved] metrics file: {outpath_csv}")
+        print("Global Averages:")
+        print(global_avg.to_string(index=False))
 
 # ============================================================
 # Main
