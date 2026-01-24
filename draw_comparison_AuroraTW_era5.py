@@ -11,6 +11,7 @@ Compare AuroraTW vs ERA5 (upper.nc + sfc.nc) with:
 - regrid/interp Aurora onto ERA5 grid before plotting
 - compute L1 loss (MAE) per var/level and show as centered header
 - output format option: png/pdf/svg/jpg/... (PDF/SVG/EPS avoids white-grid via rasterized=True)
+- COLORMAPS: 'viridis' for Surface vars, 'plasma' for Atmos/Level vars.
 
 Example:
 python draw_comparison_AuroraTW_era5.py \
@@ -221,19 +222,13 @@ def plot_side_by_side(
     mae_str = f"{mae_value:.4g}" if np.isfinite(mae_value) else "NaN"
     fig.suptitle(f"MAE (L1) = {mae_str}", fontsize=14, y=1.02)
 
-    # cbar = fig.colorbar(im1, ax=axes, shrink=0.95, pad=0.02)
-    # cbar.set_label("value (scale from ERA5)")
     divider = make_axes_locatable(axes[1])
-    # cax = divider.append_axes("right", size="4%", pad=0.08)
     cax = divider.append_axes("right", size="5%", pad=0.12)
 
     cbar = fig.colorbar(im1, cax=cax)
     cbar.set_label("value (scale from ERA5)")
 
-
-    # fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.subplots_adjust(top=0.90, wspace=0.15)
-
 
     os.makedirs(os.path.dirname(outpath_no_ext), exist_ok=True)
     outpath = f"{outpath_no_ext}.{fmt}"
@@ -340,7 +335,7 @@ def compare_and_plot(
         lev_dim_e = find_level_dim(da_e)
         lev_dim_a = find_level_dim(da_a)
 
-        # 2D lat/lon case
+        # 2D lat/lon case (Surface Variables -> viridis)
         if set(da_e.dims) == {"latitude", "longitude"} and set(da_a.dims) == {"latitude", "longitude"}:
             da_a_rg = regrid_aurora_to_era5(da_a, da_e)
 
@@ -358,7 +353,7 @@ def compare_and_plot(
                 title_left=f"{aur_var} (AuroraTW)",
                 title_right=f"{era_var} (ERA5)",
                 outpath_no_ext=outpath_no_ext,
-                cmap=cmap,
+                cmap="viridis",  # Hardcoded for Surface per request
                 vmin=vmin,
                 vmax=vmax,
                 dpi=dpi,
@@ -367,7 +362,7 @@ def compare_and_plot(
             )
             continue
 
-        # Level case: iterate ERA5 levels
+        # Level case (Atmos Variables -> plasma)
         if lev_dim_e is not None:
             levels = da_e[lev_dim_e].values
             for lev in levels:
@@ -413,7 +408,7 @@ def compare_and_plot(
                     title_left=f"{aur_var} ({lev_dim_e}={lev}) AuroraTW",
                     title_right=f"{era_var} ({lev_dim_e}={lev}) ERA5",
                     outpath_no_ext=outpath_no_ext,
-                    cmap=cmap,
+                    cmap="plasma",  # Hardcoded for Atmos/Level per request
                     vmin=vmin,
                     vmax=vmax,
                     dpi=dpi,
@@ -427,7 +422,7 @@ def compare_and_plot(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare AuroraTW vs ERA5 (upper.nc + sfc.nc): side-by-side plots, ERA5-based color scale, MAE header."
+        description="Compare AuroraTW vs ERA5: side-by-side plots. Surface='viridis', Atmos='plasma'."
     )
     parser.add_argument("--aurora_file", type=str, required=True)
     parser.add_argument("--era5_upper_file", type=str, required=True)
@@ -439,7 +434,9 @@ def main():
     parser.add_argument("--longitude", type=float, nargs=2, metavar=("LON1", "LON2"),
                         help="Longitude range (any order OK).")
 
-    parser.add_argument("--cmap", type=str, default="cividis")
+    # This arg is technically ignored now for surf/atmos logic, but kept for compatibility
+    parser.add_argument("--cmap", type=str, default="cividis",
+                        help="Default cmap (ignored for Surf/Atmos vars which use viridis/plasma).")
     parser.add_argument("--robust", action="store_true",
                         help="Use ERA5 percentile vmin/vmax (2-98%) for color scale.")
     parser.add_argument("--dpi", type=int, default=300)

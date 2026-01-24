@@ -3,7 +3,7 @@ import pandas as pd
 import torch
 import xarray as xr
 
-class AuroraTWandERA5TWDatasetforAuroraHour(torch.utils.data.Dataset):
+class AuroraTWandERA5TWDatasetforAuroraSpecificHour(torch.utils.data.Dataset):
     def __init__(
         self,
         data_root_dir: str,
@@ -21,7 +21,7 @@ class AuroraTWandERA5TWDatasetforAuroraHour(torch.utils.data.Dataset):
         get_datetime: bool = True,
         use_Aurora_input_len: list[int] = 1,
         Aurora_input_dir: str = None,
-        Aurora_pred_hour_interval: int = 1,
+        specific_hour: int = 1,
     ) -> None:
         super().__init__()
         self.data_root_dir = data_root_dir
@@ -40,7 +40,7 @@ class AuroraTWandERA5TWDatasetforAuroraHour(torch.utils.data.Dataset):
         
         self.use_Aurora_input_len = use_Aurora_input_len
         self.Aurora_input_dir = Aurora_input_dir
-        self.Aurora_pred_hour_interval = Aurora_pred_hour_interval
+        self.specific_hour = specific_hour
 
         assert self.use_Aurora_input_len >= 1, \
             "use_Aurora_input_len should be at least 1."
@@ -111,10 +111,10 @@ class AuroraTWandERA5TWDatasetforAuroraHour(torch.utils.data.Dataset):
         dir_path = Path(self.Aurora_input_dir)
         _ = [
             # str(dir_path / f"{date_hour.strftime('%Y%m%d_%H%M%S')}+{i * self.lead_time}hr.nc") \
-            str(dir_path / f"{date_hour.strftime('%Y%m%d_%H%M%S') - pd.Timedelta(hours = i * self.lead_time + self.Aurora_pred_hour_interval)}+{self.Aurora_pred_hour_interval}hr.nc") \
+            str(dir_path / f"{(date_hour + pd.Timedelta(hours = i * self.lead_time) - pd.Timedelta(hours = self.specific_hour)).strftime('%Y%m%d_%H%M%S')}+{self.specific_hour}hr.nc") \
                 for i in range(1, self.use_Aurora_input_len + 1)
         ]
-        print("What we get in Aurora input path:", _)
+        # print("What we get in Aurora input path:", _)
         return _
 
     # def __len__(self) -> int:
@@ -201,6 +201,7 @@ class AuroraTWandERA5TWDatasetforAuroraHour(torch.utils.data.Dataset):
 
         Aurora_in_t_list = []
         Aurora_start_dt = date_hour_inputs[-1] - pd.Timedelta(hours = self.use_Aurora_input_len)
+        # print(f"{date_hour_inputs=}")
         Aurora_dt_list = self._dt_to_path_Aurora( Aurora_start_dt )
         for Aurora_dt_path in Aurora_dt_list:
             with xr.open_dataset(Aurora_dt_path) as Aurora_nc:

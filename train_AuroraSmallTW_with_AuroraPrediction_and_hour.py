@@ -21,7 +21,7 @@ from aurora.model.aurora import AuroraSmall
 
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 # from datasets.AuroraTWandERA5TWDatasetforAurora import AuroraTWandERA5TWDatasetforAurora
-from datasets.AuroraTWandERA5TWDatasetforAuroraHour import AuroraTWandERA5TWDatasetforAuroraHour
+from datasets.AuroraTWandERA5TWDatasetforAuroraSpecificHour import AuroraTWandERA5TWDatasetforAuroraSpecificHour
 
 from utils.metrics import AuroraMAELoss
 from utils.training_scheduler import get_scheduler_with_warmup
@@ -66,7 +66,7 @@ def parse_args():
 
     parser.add_argument("--Aurora_input_dir", type = str, default = None)
     parser.add_argument("--use_Aurora_input_len", type = int, default = 0)
-    parser.add_argument("--Aurora_pred_hour_interval", type = int, default = 1)
+    parser.add_argument("--specific_hour", type = int, default = 1)
 
     parser.add_argument("--epochs", type = int, default = 5)
     parser.add_argument("--lr", type = float, default = 1e-3)
@@ -109,7 +109,7 @@ def create_model(args):
 def create_dataset(args, split):
     if split == "train":
         # ds = AuroraTWandERA5TWDatasetforAurora(
-        ds = AuroraTWandERA5TWDatasetforAuroraHour(
+        ds = AuroraTWandERA5TWDatasetforAuroraSpecificHour(
             data_root_dir = args.data_root_dir,
             start_date_hour = args.train_start_date_hour,
             end_date_hour = args.train_end_date_hour,
@@ -124,7 +124,7 @@ def create_dataset(args, split):
             rollout_step = args.rollout_step,
             Aurora_input_dir = args.Aurora_input_dir,
             use_Aurora_input_len = args.use_Aurora_input_len,
-            Aurora_pred_hour_interval = args.Aurora_pred_hour_interval,
+            specific_hour = args.specific_hour,
         )
     elif split == "val":
         ds = ERA5TWDatasetforAurora(
