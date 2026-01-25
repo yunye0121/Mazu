@@ -84,6 +84,7 @@ def parse_args():
     parser.add_argument("--use_dagger", action="store_true", help="Enable Iterative DAgger / Scheduled Sampling")
     parser.add_argument("--teacher_update_freq", type=int, default=10, help="Epoch frequency to update teacher weights")
     parser.add_argument("--dagger_mix_ratio_max", type=float, default=0.7, help="Max prob of using teacher output as input")
+    parser.add_argument("--ramp_end_epoch_ratio", type=float, default=0.7, help="Epoch (as fraction of total) to reach max mixing")
     parser.add_argument("--dagger_warmup_epochs", type=int, default=10, help="Epochs before starting mixing")
 
     return parser.parse_args()
@@ -120,7 +121,8 @@ def create_dataset(args, split):
         longitude = args.longitude,
         lead_time = args.lead_time,
         input_time_window = args.input_time_window,
-        rollout_step = args.rollout_step, # Ensure this allows fetching t-1, t, t+1
+        # rollout_step = args.rollout_step, # Ensure this allows fetching t-1, t, t+1
+        rollout_step = args.rollout_step if split == "train" else 1, # For val, only need 1 step ahead
     )
 
 # ... (save_checkpoint helpers remain same) ...
@@ -162,10 +164,28 @@ def slice_timeaxis(labels):
 
 # --- Helper: DAgger Mixing Schedule ---
 def get_mix_ratio(args, epoch):
-    if not args.use_dagger: return 0.0
-    if epoch <= args.dagger_warmup_epochs: return 0.0
-    ramp_length = 30
-    progress = min(1.0, (epoch - args.dagger_warmup_epochs) / ramp_length)
+    if not args.use_dagger: 
+        return 0.0
+    
+    # 1. Warmup Phase (Fixed or % of total)
+    # Let's say warmup is first 10% of training or minimum 5 epochs
+    warmup_epochs = args.dagger_warmup_epochs 
+    if epoch <= warmup_epochs:
+        return 0.0
+    
+    # 2. Ramp Phase
+    # We want to reach max mixing by roughly 50% of training
+    # So ramp_length = (Total_Epochs / 2) - Warmup
+    # ramp_end_epoch = int(args.epochs * 0.5) 
+    ramp_end_epoch = int(args.epochs * args.ramp_end_epoch_ratio)
+    ramp_length = max(1, ramp_end_epoch - warmup_epochs)
+
+    # Calculate progress (0.0 to 1.0)
+    progress = (epoch - warmup_epochs) / ramp_length
+    
+    # Clip progress to max 1.0
+    progress = min(1.0, progress)
+    
     return progress * args.dagger_mix_ratio_max
 
 def train_epoch(
@@ -327,7 +347,7 @@ def val_epoch(
         epoch,
         val_global_step,
     ):
-    _model = accelerator.unwrap_model(model)
+    unwrapped_model = accelerator.unwrap_model(model)
     model.eval()
 
     total_val_loss = 0.0
@@ -359,45 +379,23 @@ def val_epoch(
                         atmos_levels = levels,
                     ),
                 )
-
-                rollout_preds = [
-                    p for p in rollout_with_multiple_gpu(
-                        model,
-                        _model,
-                        _input,
-                        steps = args.rollout_step,
-                    )
-                ]
-
-                _label_slices = slice_timeaxis(val_label)
-
-                rollout_total_loss = 0.0
-                for step_index, pred in enumerate(rollout_preds):
-                    _label = Batch(
-                        surf_vars = _label_slices[step_index]['surf_vars'],
-                        atmos_vars = _label_slices[step_index]['atmos_vars'],
-                        static_vars = static_data["static_vars"],
-                        metadata = Metadata(
-                            lat = latitude,
-                            lon = longitude,
-                            time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), val_dates)),
-                            atmos_levels = levels,
-                        ),
-                    )
-                    loss_dict = criterion(
-                        pred.normalise(surf_stats = _model.surf_stats),
-                        _label.normalise(surf_stats = _model.surf_stats),
-                    )
-                    loss = loss_dict["all_vars"]
-                    rollout_total_loss += loss
-                loss = rollout_total_loss / len(rollout_preds)
-                
-                # _pred = model(_input)
-                # loss_dict = criterion(
-                #     _pred.normalise(surf_stats = _model.surf_stats),
-                #     _label.normalise(surf_stats = _model.surf_stats)
-                # )
-                # loss = loss_dict["all_vars"]
+                _label = Batch(
+                    surf_vars = val_label['surf_vars'],
+                    atmos_vars = val_label['atmos_vars'],
+                    static_vars = static_data["static_vars"],
+                    metadata = Metadata(
+                        lat = latitude,
+                        lon = longitude,
+                        time = tuple(map(lambda d: pd.Timestamp(d) + pd.Timedelta(hours = args.lead_time), val_dates)),
+                        atmos_levels = levels,
+                    ),
+                )
+                _pred = model(_input)
+                loss_dict = criterion(
+                    _pred.normalise(surf_stats = unwrapped_model.surf_stats),
+                    _label.normalise(surf_stats = unwrapped_model.surf_stats)
+                )
+                loss = loss_dict["all_vars"]
 
             gather_val_loss = accelerator.gather(loss)
             total_val_loss += gather_val_loss.sum().item()
