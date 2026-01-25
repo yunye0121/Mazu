@@ -490,9 +490,7 @@ def main():
     args = parse_args()
     
     # Assert Rollout Step is sufficient for replay
-    if args.rollout_step < 2:
-        logger.warning(f"Rollout step is {args.rollout_step}. Replay buffer requires at least 2 steps (T+1 and T+2). Replay will be disabled.")
-    
+        
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
     logging_dir = output_dir / args.logging_dir
@@ -524,6 +522,10 @@ def main():
             wandb.run.define_metric("train/step_loss", step_metric="train_global_step")
 
     logger.info(accelerator.state)
+
+    if args.rollout_step < 2:
+        logger.warning(f"Rollout step is {args.rollout_step}. Replay buffer requires at least 2 steps (T+1 and T+2). Replay will be disabled.")
+
 
     model = create_model(args)
     
