@@ -9,8 +9,11 @@ Supports --transpose to swap axes:
   Default: Rows=Models, Cols=Variables
   Transposed: Rows=Variables, Cols=Models (allows side-by-side comparison of specific vars)
 
-Supports --vars tokens with optional pressure level suffix:
-  surf_2t surf_10u atmos_t_850 atmos_z_500
+Supports --vars tokens with optional pressure level suffix AND optional custom title:
+  surf_2t             -> Title: surf_2t
+  surf_2t:Temperature -> Title: Temperature
+  atmos_t_850         -> Title: atmos_t (850 hPa)
+  atmos_z_500:Z500    -> Title: Z500
 
 Mapping is applied to the base name (e.g. atmos_t -> ERA5 t).
 
@@ -431,7 +434,8 @@ def main():
 
     p.add_argument("--output", type=str, default="grid_compare")
     p.add_argument("--vars", type=str, nargs="+", required=True,
-                   help="Columns. Supports suffix _<level>, e.g. atmos_t_850 atmos_z_500.")
+                   help="Columns. Supports suffix _<level> AND optional title :Title. "
+                        "e.g. atmos_t_850:Temperature")
 
     p.add_argument("--latitude", type=float, nargs=2, metavar=("LAT1", "LAT2"))
     p.add_argument("--longitude", type=float, nargs=2, metavar=("LON1", "LON2"))
@@ -486,7 +490,14 @@ def main():
     era_row = {}
     col_specs = []
 
-    for var_token in args.vars:
+    for var_token_input in args.vars:
+        # --- MODIFICATION START: Parse "var:Title" syntax ---
+        if ":" in var_token_input:
+            var_token, custom_title = var_token_input.split(":", 1)
+        else:
+            var_token, custom_title = var_token_input, None
+        # --- MODIFICATION END ---
+
         base_var, level = parse_var_and_level(var_token)
         era_var = resolve_era_var(base_var, mapping, args.map_mode)
 
@@ -509,8 +520,15 @@ def main():
             print(f"[WARN] ERA5 '{era_var}' all-NaN. Skip.")
             continue
 
+        # Use var_token as the unique key, but allow custom text for the visible title
         key = var_token
-        title = base_var if level is None else f"{base_var} ({int(level)} hPa)"
+        
+        # --- MODIFICATION START: Apply custom title if exists ---
+        if custom_title:
+            title = custom_title
+        else:
+            title = base_var if level is None else f"{base_var} ({int(level)} hPa)"
+        # --- MODIFICATION END ---
         
         # Determine variable-family colormap
         if base_var.startswith("surf_"):
@@ -635,7 +653,7 @@ def main():
         rowlabel_x=args.rowlabel_x,
         title_pad=args.title_pad,
         model_value_scale=args.model_value_scale,
-        transpose=args.transpose,  # Pass the new argument
+        transpose=args.transpose,
     )
 
     if args.mae_out:

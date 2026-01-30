@@ -36,6 +36,7 @@ def set_seed(seed):
 def parse_args():
     parser = argparse.ArgumentParser(description = "Aurora Evaluation Script (Single GPU).")
     parser.add_argument('--data_root_dir', type = str, required = True)
+    parser.add_argument("--use_pretrained_weight", action = "store_true")
     parser.add_argument('--checkpoint_path', type = str, required = True)
     parser.add_argument('--batch_size', type = int, default = 16)
     parser.add_argument('--num_workers', type = int, default = 4)
@@ -81,7 +82,10 @@ def create_model(args, device):
         timestep = pd.Timedelta(hours = args.timestep_hours),
         stabilise_level_agg = args.stabilise_level_agg,
     )
-    if args.checkpoint_path:
+    if args.use_pretrained_weight:
+        logger.info("Loading pretrained weights provided by Microsoft Aurora...")
+        model.load_checkpoint("microsoft/aurora", "aurora-0.25-small-pretrained.ckpt", strict = False)
+    elif args.checkpoint_path:
         logger.info(f"Loading checkpoint: {args.checkpoint_path}")
 
         load_Aurora_weight(
