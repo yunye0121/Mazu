@@ -18,6 +18,8 @@ from safetensors.torch import load_file
 
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
+from pangu_lib.models.pangu import PanguModel
+from pangu_lib.adapter import PanguAuroraAdapter
 
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 
@@ -108,7 +110,7 @@ def create_model(args):
     # 1. Initialize the Base Pangu Model
     # Note: You need to set these shapes to match your ERA5TWDatasetforAurora args
     pangu_base = PanguModel(
-        data_spatial_shape = (len(args.levels), int(abs(args.latitude[1] - args.latitude[0]) / 0.25), int(abs(args.longitude[1] - args.longitude[0]) / 0.25)),
+        data_spatial_shape = (len(args.levels), int(abs(args.latitude[1] - args.latitude[0]) / 0.25) + 1, int(abs(args.longitude[1] - args.longitude[0]) / 0.25) + 1),
         upper_vars = len(args.upper_variables),
         surface_vars = len(args.surface_variables),
         depths =[2, 6],       # Standard Pangu Config
@@ -116,7 +118,7 @@ def create_model(args):
         embed_dim = 192,      # Standard Pangu Config
         patch_shape = (2, 4, 4),
         window_size = (2, 6, 12),
-        constant_mask_paths = None, # Or provide paths if you have them
+        constant_mask_paths = ["/work/yunye0121/Mazu/pangu_lib/static_npy_data/lsm.npy", "/work/yunye0121/Mazu/pangu_lib/static_npy_data/slt.npy", "/work/yunye0121/Mazu/pangu_lib/static_npy_data/z.npy"], # Or provide paths if you have them
         smoothing_kernel_size = None,
         segmented_smooth = False,
         segmented_smooth_boundary_width = None,

@@ -3,16 +3,18 @@ import torch.nn as nn
 from aurora import Batch
 
 class PanguAuroraAdapter(nn.Module):
-    def __init__(self, pangu_model, surf_stats):
+    def __init__(self, pangu_model, surf_stats = None):
         super().__init__()
         self.model = pangu_model
         
         # We need these stats to perform normalization inside the forward pass
-        self.surf_stats = surf_stats 
+        self.surf_stats = surf_stats if surf_stats is not None else {}
 
         # Define variable ordering for Pangu
-        self.surf_order = ["msl", "10u", "10v", "2t"]
-        self.upper_order = ["z", "q", "t", "u", "v"]
+        # self.surf_order = ["msl", "10u", "10v", "2t"]
+        self.surf_order = ["2t", "10u", "10v", "msl"]
+        # self.upper_order = ["z", "q", "t", "u", "v"]
+        self.upper_order = ["u", "v", "t", "q", "z"]
 
     def forward(self, batch: Batch) -> Batch:
         device = next(self.model.parameters()).device

@@ -180,7 +180,8 @@ class PanguModel(nn.Module):
         res_conn_upper = self.residual * input_upper
         res_conn_surface = self.residual * input_surface
         x: Tensor = self.patch_embed(input_upper, input_surface)
-        with torch.cuda.amp.autocast(enabled=False):
+        # with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             x = self.layer1(x.float())
             skip = x
             x = self.downsample(x)
