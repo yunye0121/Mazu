@@ -45,7 +45,8 @@ def plot_surf_vars(ds, figsize=(8, 6), outdir="plots_surf", cmap="cividis",
                 if latitude_range is not None and longitude_range is not None:
                     da = select_latlon_range(da, latitude_range, longitude_range)
                 
-                filename = f"{outdir}/{var}.png"
+                # filename = f"{outdir}/{var}.png"
+                filename = f"{outdir}/{var}.pdf"
                 plot_clean_heatmap(da, filename, cmap, figsize)
             else:
                 print(f"Skipping {var}: dims {da.dims} (not 2D lat/lon)")
@@ -67,7 +68,8 @@ def plot_atmos_vars_all_levels(ds, figsize=(8, 6), outdir="plots_atmos", cmap="v
                         if latitude_range is not None and longitude_range is not None:
                             da_level = select_latlon_range(da_level, latitude_range, longitude_range)
                         
-                        filename = f"{outdir}/{var}_{lev}.png"
+                        # filename = f"{outdir}/{var}_{lev}.png"
+                        filename = f"{outdir}/{var}_{lev}.pdf"
                         plot_clean_heatmap(da_level, filename, cmap, figsize)
                     else:
                         print(f"Skipping {var} at level {lev}: dims {da_level.dims} (not 2D lat/lon)")

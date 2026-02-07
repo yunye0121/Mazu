@@ -4,6 +4,8 @@ Generate loss-vs-time plots from one or more CSVs.
 
 UPDATES:
 - Added --var_map for custom variable titles.
+- Added --xlabel / --ylabel configuration.
+- Added --hide_xlabel / --hide_ylabel to toggle visibility.
 """
 
 import argparse
@@ -71,6 +73,16 @@ def parse_args():
     p.add_argument("--bold_title", action="store_true", help="Bold subplot titles.")
     p.add_argument("--bold_labels", action="store_true", help="Bold axis labels.")
 
+    # ### NEW ADDITION 1: Axis Labels & Visibility ###
+    p.add_argument("--ylabel", type=str, default="MAE", 
+                   help="Label for Y axis (default: MAE).")
+    p.add_argument("--xlabel", type=str, default="hours", 
+                   help="Label for X axis (default: hours).")
+    p.add_argument("--hide_ylabel", action="store_true", 
+                   help="If set, hides the Y axis label.")
+    p.add_argument("--hide_xlabel", action="store_true", 
+                   help="If set, hides the X axis label.")
+
     # selection & layouts
     p.add_argument("--vars", nargs="+", default=None, help="Only include these variables.")
     p.add_argument("--combine", action="store_true", help="Combine variables in ONE axes.")
@@ -87,7 +99,7 @@ def parse_args():
     p.add_argument("--legend_names", nargs="+", default=None, help="Custom legend labels.")
     p.add_argument("--styles", nargs="+", default=None, help="Per-CSV style kwargs.")
 
-    # ### NEW ADDITION 1: Argument for Title Mapping ###
+    # Title Mapping
     p.add_argument("--var_map", action="append", default=[], 
                    help="Map var names to titles: --var_map loss_val='Validation Loss'")
 
@@ -202,7 +214,7 @@ def dedup_legend_from_axes(axes: List[plt.Axes]):
 def main():
     args = parse_args()
 
-    # ### NEW ADDITION 2: Parse Title Map ###
+    # Parse Title Map
     var_mapping = {}
     for m in args.var_map:
         if "=" in m:
@@ -242,8 +254,11 @@ def main():
 
     all_vars = collect_all_variables(frames, var_cols)
     if args.vars:
-        selected = set(map(str, args.vars))
-        plot_vars = [v for v in all_vars if v in selected]
+        # Create a set of existing variables for fast lookup
+        existing_vars_set = set(all_vars)
+        # Iterate through YOUR list (args.vars) to preserve your order
+        # Only keep variables that actually exist in the CSVs
+        plot_vars = [v for v in args.vars if v in existing_vars_set]
     else:
         plot_vars = all_vars
 
@@ -274,10 +289,17 @@ def main():
             if plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
                                  args.alpha, args.markersize, args.legend_names, style_by_file):
                 any_plotted = True
-                # ### NEW ADDITION 3a: Use custom title ###
-                ax.set_title(get_title(str(var_name)))
-                ax.set_xlabel("hours")
-                ax.grid(True)
+                
+                # ### NEW ADDITION 2a: Labels & visibility ###
+                
+                # ax.set_title(get_title(str(var_name)))
+                
+                if not args.hide_xlabel:
+                    ax.set_xlabel(args.xlabel)
+                if not args.hide_ylabel:
+                    ax.set_ylabel(args.ylabel)
+                    
+                # ax.grid(True)
             else:
                 ax.set_visible(False)
         for j in range(len(plot_vars), len(flat_axes)):
@@ -322,7 +344,12 @@ def main():
             any_plotted = any_plotted or did
 
         if any_plotted:
-            ax.set_xlabel("hours")
+            # ### NEW ADDITION 2b: Labels & visibility ###
+            if not args.hide_xlabel:
+                ax.set_xlabel(args.xlabel)
+            if not args.hide_ylabel:
+                ax.set_ylabel(args.ylabel)
+
             ax.set_title(f"Combined: {len(plot_vars)} variables")
             ax.grid(True)
             
@@ -350,8 +377,13 @@ def main():
             apply_theme_and_color(args, fig, [ax])
             if plot_one_variable(ax, var_name, csv_paths, row_maps, time_cols_by_file, hours_by_file,
                                  args.alpha, args.markersize, args.legend_names, style_by_file):
-                ax.set_xlabel("hours")
-                # ### NEW ADDITION 3b: Use custom title ###
+                
+                # ### NEW ADDITION 2c: Labels & visibility ###
+                if not args.hide_xlabel:
+                    ax.set_xlabel(args.xlabel)
+                if not args.hide_ylabel:
+                    ax.set_ylabel(args.ylabel)
+
                 ax.set_title(get_title(str(var_name)))
                 ax.grid(True)
                 

@@ -621,7 +621,8 @@ def main():
 
     rows = []
     rows.append({
-        "label": "ERA5",
+        # "label": "ERA5",
+        "label": "Ground Truth",
         "kind": "era",
         "data": {cs["key"]: era_row[cs["key"]] for cs in col_specs},
         "mae": {}

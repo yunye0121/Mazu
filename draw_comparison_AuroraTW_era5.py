@@ -176,6 +176,7 @@ def regrid_aurora_to_era5(da_a: xr.DataArray, da_e: xr.DataArray) -> xr.DataArra
 
 
 def plot_side_by_side(
+    args,
     da_left: xr.DataArray,
     da_right: xr.DataArray,
     title_left: str,
@@ -212,21 +213,25 @@ def plot_side_by_side(
         **raster_kw
     )
 
-    axes[0].set_title(title_left)
-    axes[1].set_title(title_right)
+    if args.show_var_title:
+        axes[0].set_title(title_left, fontsize=16, fontweight='bold')
+        axes[1].set_title(title_right, fontsize=16, fontweight='bold')
+    
     axes[0].set_xlabel("longitude")
     axes[1].set_xlabel("longitude")
     axes[0].set_ylabel("latitude")
     axes[1].set_ylabel("latitude")
 
     mae_str = f"{mae_value:.4g}" if np.isfinite(mae_value) else "NaN"
-    fig.suptitle(f"MAE (L1) = {mae_str}", fontsize=14, y=1.02)
+    # show if not
+    if args.show_mae:
+        fig.suptitle(f"MAE (L1) = {mae_str}", fontsize=14, y=1.02)
 
     divider = make_axes_locatable(axes[1])
     cax = divider.append_axes("right", size="5%", pad=0.12)
 
     cbar = fig.colorbar(im1, cax=cax)
-    cbar.set_label("value (scale from ERA5)")
+    # cbar.set_label("value (scale from ERA5)")
 
     fig.subplots_adjust(top=0.90, wspace=0.15)
 
@@ -286,6 +291,7 @@ def build_var_pairs(aur: xr.Dataset, era: xr.Dataset, mapping: dict, map_mode: s
 
 
 def compare_and_plot(
+    args,
     aurora_path: str,
     era5_upper_path: str,
     era5_sfc_path: str,
@@ -348,10 +354,13 @@ def compare_and_plot(
 
             outpath_no_ext = os.path.join(out_base, f"{aur_var}__vs__{era_var}")
             plot_side_by_side(
+                args,   
                 da_left=da_a_rg,
                 da_right=da_e,
-                title_left=f"{aur_var} (AuroraTW)",
-                title_right=f"{era_var} (ERA5)",
+                # title_left=f"{aur_var} (AuroraTW)",
+                # title_right=f"{era_var} (ERA5)",
+                title_left=f"Model Prediction",
+                title_right=f"Ground Truth",
                 outpath_no_ext=outpath_no_ext,
                 cmap="viridis",  # Hardcoded for Surface per request
                 vmin=vmin,
@@ -403,10 +412,13 @@ def compare_and_plot(
 
                 outpath_no_ext = os.path.join(out_base, f"{aur_var}__vs__{era_var}__{lev_dim_e}_{lev}")
                 plot_side_by_side(
+                    args,
                     da_left=da_a_lev_rg,
                     da_right=da_e_lev,
-                    title_left=f"{aur_var} ({lev_dim_e}={lev}) AuroraTW",
-                    title_right=f"{era_var} ({lev_dim_e}={lev}) ERA5",
+                    # title_left=f"{aur_var} ({lev_dim_e}={lev}) AuroraTW",
+                    # title_right=f"{era_var} ({lev_dim_e}={lev}) ERA5",
+                    title_left=f"Model Prediction",
+                    title_right=f"Ground Truth",
                     outpath_no_ext=outpath_no_ext,
                     cmap="plasma",  # Hardcoded for Atmos/Level per request
                     vmin=vmin,
@@ -428,6 +440,9 @@ def main():
     parser.add_argument("--era5_upper_file", type=str, required=True)
     parser.add_argument("--era5_sfc_file", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="plots_compare_out")
+
+    parser.add_argument("--show_var_title", action="store_true", help="Show variable names as subplot titles.")
+    parser.add_argument("--show_mae", action="store_true", help="Show MAE in the main title.")
 
     parser.add_argument("--latitude", type=float, nargs=2, metavar=("LAT1", "LAT2"),
                         help="Latitude range (any order OK), e.g. --latitude 39.5 5")
@@ -463,6 +478,7 @@ def main():
     lon_range = tuple(args.longitude) if args.longitude is not None else None
 
     compare_and_plot(
+        args,
         aurora_path=args.aurora_file,
         era5_upper_path=args.era5_upper_file,
         era5_sfc_path=args.era5_sfc_file,

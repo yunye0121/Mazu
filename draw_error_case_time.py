@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-draw_time_series_split.py
+draw_time_series_compare.py
 
-Generates time-series grid plots where EACH TIME STEP comes from DIFFERENT files.
+Generates time-series grid plots comparing MULTIPLE models against Ground Truth.
 """
 
 import os
@@ -111,93 +111,162 @@ def symmetric_minmax(vals, robust=False):
 
 def plot_grid(
     col_data, 
-    var_name,        # This is the string displayed in the title
+    model_names,     
+    var_name,        
     outpath, 
     vmin, vmax, 
     dvmin, dvmax, 
     cmap="viridis", 
     diff_cmap="RdBu_r",
     wspace=0.05, hspace=0.1,
-    single_cbar=False
+    row_cbar=False   
 ):
     cols = len(col_data)
-    fig_w = max(10, 4.0 * cols)
-    fig_h = 9
+    num_models = len(model_names)
+    rows = 1 + (2 * num_models)
     
-    fig, axes = plt.subplots(3, cols, figsize=(fig_w, fig_h))
+    # Calculate figure size
+    fig_w = max(10, 4.0 * cols)
+    fig_h = 3.0 * rows 
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_w, fig_h))
     
     if cols == 1:
         axes = np.expand_dims(axes, axis=1)
 
-    labels = ["GroundTruth", "Prediction", "Difference"]
-    
-    im_val = None
-    im_diff = None
+    # To store the last image of each row for colorbar creation
+    row_last_im = [None] * rows
 
     for j, item in enumerate(col_data):
         ax_col = axes[:, j]
-        # ax_col[0].set_title(f"+{item['hour']}h", fontsize=14, pad=16, fontweight='bold')
-        ax_col[0].set_title(f"+{item['hour']}h", fontsize=14, pad=16)
+        
+        # --- Column Title ---
+        ax_col[0].set_title(f"+{item['hour']}h", fontsize=20, pad=16, fontweight='bold')
 
-        rows_to_plot = [
-            ("era",  item['era'],  vmin, vmax, cmap),
-            ("pred", item['pred'], vmin, vmax, cmap),
-            ("diff", item['diff'], dvmin, dvmax, diff_cmap)
-        ]
-
-        for i, (kind, da, vm, vx, cm) in enumerate(rows_to_plot):
-            ax = ax_col[i]
-            
-            if da is None:
-                ax.text(0.5, 0.5, "MISSING", ha='center', va='center')
-                ax.set_xticks([])
-                ax.set_yticks([])
-                continue
-            
-            im = ax.pcolormesh(
-                da.longitude, da.latitude, da.values, 
-                vmin=vm, vmax=vx, cmap=cm, shading='nearest'
+        # === Row 0: Ground Truth ===
+        ax_gt = ax_col[0]
+        da_e = item['era']
+        
+        if da_e is not None:
+            im_val = ax_gt.pcolormesh(
+                da_e.longitude, da_e.latitude, da_e.values, 
+                vmin=vmin, vmax=vmax, cmap=cmap, shading='nearest'
             )
-            
-            if i < 2: im_val = im   
-            else:     im_diff = im  
+            row_last_im[0] = im_val 
+        else:
+            ax_gt.text(0.5, 0.5, "MISSING ERA", ha='center', va='center')
 
-            ax.set_xticks([])
-            ax.set_yticks([])
+        ax_gt.set_xticks([])
+        ax_gt.set_yticks([])
+
+        # Label Row 0
+        if j == 0:
+            ax_gt.text(-0.15, 0.5, "Ground Truth", 
+                    rotation=90, va='center', ha='center',
+                    transform=ax_gt.transAxes, 
+                    fontsize=14, fontweight='bold')
+        
+        # Per-panel colorbar (ONLY if row_cbar is FALSE)
+        if not row_cbar and da_e is not None:
+             divider = make_axes_locatable(ax_gt)
+             cax = divider.append_axes("right", size="5%", pad=0.05)
+             fig.colorbar(im_val, cax=cax)
+
+        # === Model Rows ===
+        current_row_idx = 1
+        
+        for m_name in model_names:
+            m_data = item['models'].get(m_name, {})
+            da_pred = m_data.get('pred')
+            da_diff = m_data.get('diff')
+
+            # --- Prediction Row ---
+            ax_p = ax_col[current_row_idx]
+            if da_pred is not None:
+                im_p = ax_p.pcolormesh(
+                    da_pred.longitude, da_pred.latitude, da_pred.values, 
+                    vmin=vmin, vmax=vmax, cmap=cmap, shading='nearest'
+                )
+                row_last_im[current_row_idx] = im_p
+                
+                if not row_cbar:
+                    divider = make_axes_locatable(ax_p)
+                    cax = divider.append_axes("right", size="5%", pad=0.05)
+                    fig.colorbar(im_p, cax=cax)
+            else:
+                ax_p.text(0.5, 0.5, "MISSING", ha='center', va='center')
             
+            ax_p.set_xticks([])
+            ax_p.set_yticks([])
+
             if j == 0:
-                ax.text(-0.15, 0.5, labels[i], 
+                ax_p.text(-0.15, 0.5, f"{m_name}", 
                         rotation=90, va='center', ha='center',
-                        transform=ax.transAxes, 
-                        fontsize=14)
-                        # fontweight='bold', fontsize=14)
+                        transform=ax_p.transAxes, fontsize=14, fontweight='bold')
 
-            if not single_cbar:
-                divider = make_axes_locatable(ax)
-                cax = divider.append_axes("right", size="5%", pad=0.05)
-                fig.colorbar(im, cax=cax)
+            # --- Difference Row ---
+            ax_d = ax_col[current_row_idx + 1]
+            if da_diff is not None:
+                im_d = ax_d.pcolormesh(
+                    da_diff.longitude, da_diff.latitude, da_diff.values, 
+                    vmin=dvmin, vmax=dvmax, cmap=diff_cmap, shading='nearest'
+                )
+                row_last_im[current_row_idx + 1] = im_d
 
-    right_margin = 0.90 if single_cbar else 0.98
-    plt.subplots_adjust(wspace=wspace, hspace=hspace, right=right_margin, top=0.92)
+                if not row_cbar:
+                    divider = make_axes_locatable(ax_d)
+                    cax = divider.append_axes("right", size="5%", pad=0.05)
+                    fig.colorbar(im_d, cax=cax)
+            else:
+                ax_d.text(0.5, 0.5, "MISSING", ha='center', va='center')
 
-    if single_cbar:
-        if im_val:
-            cax_val = fig.add_axes([0.92, 0.40, 0.015, 0.45]) 
-            cb_val = fig.colorbar(im_val, cax=cax_val)
-        if im_diff:
-            cax_diff = fig.add_axes([0.92, 0.12, 0.015, 0.22]) 
-            cb_diff = fig.colorbar(im_diff, cax=cax_diff)
+            ax_d.set_xticks([])
+            ax_d.set_yticks([])
 
-    if single_cbar and cols > 0:
-        pos_left = axes[0, 0].get_position()
-        pos_right = axes[0, -1].get_position()
-        visual_center_x = (pos_left.x0 + pos_right.x1) / 2
-        fig.suptitle(f"{var_name}", x=visual_center_x, y=1.02, fontsize=24, fontweight='bold')
-    else:
-        fig.suptitle(f"{var_name}", y=1.02, fontsize=24, fontweight='bold')
+            if j == 0:
+                ax_d.text(-0.15, 0.5, "Diff", 
+                        rotation=90, va='center', ha='center',
+                        # transform=ax_d.transAxes, fontsize=12, color='gray', style='italic')
+                        transform=ax_d.transAxes, fontsize=14, fontweight='bold')
+
+            current_row_idx += 2
+
+    # -- Global Layout & Row Colorbars --
     
+    if row_cbar:
+        # Reserve more space on the right for the row colorbars
+        plt.subplots_adjust(wspace=wspace, hspace=hspace, right=0.88, top=0.95)
+        
+        for r in range(rows):
+            im = row_last_im[r]
+            if im is not None:
+                # Use fig.add_axes based on the last axis position
+                # This prevents the last plot from shrinking
+                ax_last = axes[r, -1]
+                pos = ax_last.get_position()
+                
+                cax_x = pos.x1 + 0.015
+                cax_y = pos.y0
+                cax_w = 0.015
+                cax_h = pos.height
+                
+                cax = fig.add_axes([cax_x, cax_y, cax_w, cax_h])
+                
+                # # Determine label
+                # if r == 0:
+                #     label = "Value"
+                # elif (r % 2) != 0: 
+                #     label = "Value"
+                # else: 
+                #     label = "Diff"
+                
+                fig.colorbar(im, cax=cax)
+    else:
+        # Default tight layout
+        plt.subplots_adjust(wspace=wspace, hspace=hspace, right=0.98, top=0.95)
+
     os.makedirs(os.path.dirname(outpath) or ".", exist_ok=True)
-    plt.savefig(outpath, bbox_inches='tight', dpi=200)
+    plt.savefig(outpath, bbox_inches='tight', dpi=300)
     plt.close(fig)
     print(f"Saved: {outpath}")
 
@@ -207,19 +276,19 @@ def main():
     p = argparse.ArgumentParser(description="Plot time-series grid from split files.")
     p.add_argument("--manifest", type=str, required=True, help="JSON file mapping hours to file paths.")
     p.add_argument("--vars", type=str, nargs="+", required=True, help="Variables to plot (e.g. surf_2t atmos_z_500).")
-    p.add_argument("--output_prefix", type=str, default="split_out", help="Output filename prefix.")
+    p.add_argument("--output_prefix", type=str, default="compare_out", help="Output filename prefix.")
     
     # Layout Options
     p.add_argument("--wspace", type=float, default=0.05, help="Horizontal space between subplots.")
     p.add_argument("--hspace", type=float, default=0.1, help="Vertical space between subplots.")
-    p.add_argument("--single_cbar", action="store_true", help="Use a single colorbar on the right instead of one per panel.")
+    
+    # Colorbar Mode
+    p.add_argument("--row_cbar", action="store_true", help="Add ONE colorbar at the end of EACH row (prevents plot resizing).")
 
     # Data Selection
     p.add_argument("--latitude", type=float, nargs=2, help="Lat range (e.g. 20 50)")
     p.add_argument("--longitude", type=float, nargs=2, help="Lon range (e.g. 100 140)")
     p.add_argument("--map", action="append", default=[], help="Map vars: --map surf_2t=2t")
-    
-    # ### NEW ADDITION 1: Add argument for Title Mapping ###
     p.add_argument("--title_map", action="append", default=[], help="Map var names to titles: --title_map surf_2t='Surface Temp'")
     
     p.add_argument("--robust", action="store_true", help="Use 2nd/98th percentile for scaling.")
@@ -231,14 +300,24 @@ def main():
         manifest = json.load(f)
     manifest.sort(key=lambda x: x.get('hour', 0))
 
-    # Parse variable mapping (for data loading)
+    # Detect models from the first entry
+    first_pred = manifest[0].get('pred')
+    if isinstance(first_pred, dict):
+        model_names = sorted(list(first_pred.keys()))
+        print(f"Found models: {model_names}")
+    else:
+        model_names = ["Prediction"]
+        for m in manifest:
+            if isinstance(m['pred'], str):
+                m['pred'] = {"Prediction": m['pred']}
+
+    # Parse variable mapping
     data_mapping = {}
     for m in args.map:
         if "=" in m:
             k, v = m.split("=", 1)
             data_mapping[k.strip()] = v.strip()
 
-    # ### NEW ADDITION 2: Parse Title Mapping (for display) ###
     title_mapping = {}
     for m in args.title_map:
         if "=" in m:
@@ -260,57 +339,72 @@ def main():
 
         for entry in manifest:
             hour = entry.get('hour', '?')
-            try:
-                ds_p = standardize_latlon(xr.open_dataset(entry['pred']))
-                ds_e = open_era5_merged(entry['era_upper'], entry['era_sfc'])
-            except Exception as e:
-                print(f"[WARN] Failed to open files for T+{hour}h: {e}")
-                col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
-                continue
-
-            if base_var not in ds_p:
-                print(f"[WARN] '{base_var}' missing in Pred file for T+{hour}h")
-                col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
-                continue
-            if era_var not in ds_e:
-                print(f"[WARN] '{era_var}' missing in ERA5 file for T+{hour}h")
-                col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
-                continue
             
-            da_p = get_first_time(ds_p[base_var])
-            da_e = get_first_time(ds_e[era_var])
+            # -- Load ERA5 --
+            try:
+                ds_e = open_era5_merged(entry['era_upper'], entry['era_sfc'])
+                if era_var not in ds_e:
+                    print(f"[WARN] '{era_var}' missing in ERA5 for T+{hour}h")
+                    da_e = None
+                else:
+                    da_e = get_first_time(ds_e[era_var])
+                    da_e = select_level(select_latlon_range(da_e, lat_r, lon_r), lev)
+            except Exception as e:
+                print(f"[WARN] Failed to open ERA5 for T+{hour}h: {e}")
+                da_e = None
 
-            da_p = select_level(select_latlon_range(da_p, lat_r, lon_r), lev)
-            da_e = select_level(select_latlon_range(da_e, lat_r, lon_r), lev)
-
-            if da_p.size == 0 or da_e.size == 0:
-                print(f"[WARN] Empty data after crop/level select for T+{hour}h")
-                col_data.append({'hour': hour, 'era': None, 'pred': None, 'diff': None})
-                continue
-
-            da_p_reg = regrid_to_era(da_p, da_e)
-            diff = da_p_reg - da_e
-
-            col_data.append({
+            step_data = {
                 'hour': hour,
                 'era': da_e,
-                'pred': da_p_reg,
-                'diff': diff
-            })
+                'models': {}
+            }
 
-            all_vals.append(da_e.values.ravel())
-            all_vals.append(da_p_reg.values.ravel())
-            all_diffs.append(diff.values.ravel())
+            if da_e is not None:
+                all_vals.append(da_e.values.ravel())
 
+            # -- Load Models --
+            for m_name in model_names:
+                pred_path = entry['pred'].get(m_name)
+                da_p_reg = None
+                diff = None
+                
+                if pred_path and os.path.exists(pred_path):
+                    try:
+                        ds_p = standardize_latlon(xr.open_dataset(pred_path))
+                        if base_var in ds_p:
+                            da_p = get_first_time(ds_p[base_var])
+                            da_p = select_level(select_latlon_range(da_p, lat_r, lon_r), lev)
+                            
+                            # Regrid and Diff
+                            if da_e is not None:
+                                da_p_reg = regrid_to_era(da_p, da_e)
+                                diff = da_p_reg - da_e
+                                
+                                all_vals.append(da_p_reg.values.ravel())
+                                all_diffs.append(diff.values.ravel())
+                    except Exception as e:
+                        print(f"[WARN] Error loading {m_name} at T+{hour}h: {e}")
+
+                step_data['models'][m_name] = {
+                    'pred': da_p_reg,
+                    'diff': diff
+                }
+
+            col_data.append(step_data)
+
+        # -- Compute Global Min/Max --
         if not all_vals:
             print(f"No valid data found for {var_token}. Skipping.")
             continue
             
         big_v = np.concatenate(all_vals)
-        big_d = np.concatenate(all_diffs)
+        big_d = np.concatenate(all_diffs) if all_diffs else np.array([])
         
         vmin, vmax = finite_minmax(big_v, robust=args.robust)
-        dvmin, dvmax = symmetric_minmax(big_d, robust=args.robust)
+        if big_d.size > 0:
+            dvmin, dvmax = symmetric_minmax(big_d, robust=args.robust)
+        else:
+            dvmin, dvmax = -1, 1
 
         if "surf" in base_var:
             cmap = "inferno" 
@@ -320,21 +414,19 @@ def main():
             cmap = "viridis"
 
         out_filename = f"{args.output_prefix}_{var_token}.pdf"
-        
-        # ### NEW ADDITION 3: Determine Display Name ###
-        # If the user provided a title map, use it. Otherwise use the var_token.
         display_name = title_mapping.get(var_token, var_token)
 
         plot_grid(
             col_data, 
-            var_name=display_name, # Pass the pretty name here
-            outpath=out_filename,  # Keep the technical name here for the file
+            model_names=model_names,
+            var_name=display_name, 
+            outpath=out_filename, 
             vmin=vmin, vmax=vmax, 
             dvmin=dvmin, dvmax=dvmax, 
             cmap=cmap,
             wspace=args.wspace,
             hspace=args.hspace,
-            single_cbar=args.single_cbar
+            row_cbar=args.row_cbar
         )
 
 if __name__ == "__main__":
