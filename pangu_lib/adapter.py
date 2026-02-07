@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from aurora import Batch
+import numpy as np
+import pandas as pd
 
 class PanguAuroraAdapter(nn.Module):
     def __init__(self, pangu_model, surf_stats = None):
@@ -15,6 +17,16 @@ class PanguAuroraAdapter(nn.Module):
         self.surf_order = ["2t", "10u", "10v", "msl"]
         # self.upper_order = ["z", "q", "t", "u", "v"]
         self.upper_order = ["u", "v", "t", "q", "z"]
+
+        self.patch_size = 4
+        self.lead_time = 1
+
+    def batch_transform_hook(self, batch: Batch) -> Batch:
+        """Transform the batch right after receiving it and before normalisation.
+
+        This function should be idempotent.
+        """
+        return batch
 
     def forward(self, batch: Batch) -> Batch:
         device = next(self.model.parameters()).device
@@ -71,6 +83,12 @@ class PanguAuroraAdapter(nn.Module):
         pred_atmos_vars = {}
         for i, var_name in enumerate(self.upper_order):
             pred_atmos_vars[var_name] = pred_upper[..., i].unsqueeze(1)
+
+
+        batch.metadata.rollout_step += 1  # Increment rollout step for the metadata of the next prediction
+        # print(f"Rollout Step: {batch.metadata.rollout_step}")
+        # batch.metadata.time=tuple(t + self.lead_time for t in batch.metadata.time),
+        batch.metadata.time = tuple(t + pd.Timedelta(hours=self.lead_time) for t in batch.metadata.time)
 
         # Create a temporary batch containing the normalized predictions
         pred_batch_norm = Batch(
