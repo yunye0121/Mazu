@@ -128,8 +128,10 @@ def plot_grid(
     # Calculate figure size
     fig_w = max(10, 4.0 * cols)
     fig_h = 3.0 * rows 
-    
     fig, axes = plt.subplots(rows, cols, figsize=(fig_w, fig_h))
+
+    # ADD THIS LINE HERE:
+    fig.suptitle(var_name, fontsize=26, fontweight='bold', y=1.02)
     
     if cols == 1:
         axes = np.expand_dims(axes, axis=1)
@@ -150,7 +152,7 @@ def plot_grid(
         if da_e is not None:
             im_val = ax_gt.pcolormesh(
                 da_e.longitude, da_e.latitude, da_e.values, 
-                vmin=vmin, vmax=vmax, cmap=cmap, shading='nearest'
+                vmin=vmin, vmax=vmax, cmap=cmap, shading='nearest', rasterized=True  # <--- Add this
             )
             row_last_im[0] = im_val 
         else:
@@ -185,7 +187,7 @@ def plot_grid(
             if da_pred is not None:
                 im_p = ax_p.pcolormesh(
                     da_pred.longitude, da_pred.latitude, da_pred.values, 
-                    vmin=vmin, vmax=vmax, cmap=cmap, shading='nearest'
+                    vmin=vmin, vmax=vmax, cmap=cmap, shading='nearest', rasterized=True  # <--- Add this
                 )
                 row_last_im[current_row_idx] = im_p
                 
@@ -209,7 +211,7 @@ def plot_grid(
             if da_diff is not None:
                 im_d = ax_d.pcolormesh(
                     da_diff.longitude, da_diff.latitude, da_diff.values, 
-                    vmin=dvmin, vmax=dvmax, cmap=diff_cmap, shading='nearest'
+                    vmin=dvmin, vmax=dvmax, cmap=diff_cmap, shading='nearest', rasterized=True
                 )
                 row_last_im[current_row_idx + 1] = im_d
 

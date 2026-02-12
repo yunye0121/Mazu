@@ -292,14 +292,14 @@ def main():
                 
                 # ### NEW ADDITION 2a: Labels & visibility ###
                 
-                # ax.set_title(get_title(str(var_name)))
+                ax.set_title(get_title(str(var_name)))
                 
                 if not args.hide_xlabel:
                     ax.set_xlabel(args.xlabel)
                 if not args.hide_ylabel:
                     ax.set_ylabel(args.ylabel)
                     
-                # ax.grid(True)
+                ax.grid(True)
             else:
                 ax.set_visible(False)
         for j in range(len(plot_vars), len(flat_axes)):
