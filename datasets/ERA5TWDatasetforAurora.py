@@ -94,9 +94,8 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
     def __len__(self) -> int:
         duration = self.end_date_hour - self.start_date_hour
-        duration_interval = round(duration.total_seconds()) // (60 * 60)
-        total_interval = duration_interval + 1 - self.input_time_window + 1 - self.lead_time * self.rollout_step
-        return total_interval
+        duration_hours = round(duration.total_seconds()) // (60 * 60)
+        return duration_hours - (self.input_time_window - 1 + self.rollout_step) * self.lead_time + 1
 
     def _nc_to_dict(self, upper_nc, sfc_nc) -> dict:
         _d = {
@@ -136,7 +135,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> tuple:
         date_hour_inputs = [
-            self.start_date_hour + pd.Timedelta(hours = index + i) \
+            self.start_date_hour + pd.Timedelta(hours = index + i * self.lead_time) \
             for i in range(self.input_time_window)
         ]
         date_hour_outputs = [
@@ -177,24 +176,24 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         """
         last_index = len(self) - 1
 
-        # last input window
-        last_input_end = (
-            self.start_date_hour
-            + pd.Timedelta(hours=last_index + self.input_time_window - 1)
-        )
+        # last input time list
+        last_input_times = [
+            self.start_date_hour + pd.Timedelta(hours=last_index + i * self.lead_time)
+            for i in range(self.input_time_window)
+        ]
 
-        # last rollout output time
-        last_output_time = (
-            last_input_end
-            + pd.Timedelta(hours=self.lead_time * self.rollout_step)
-        )
+        # last output time list
+        last_output_times = [
+            last_input_times[-1] + pd.Timedelta(hours=self.lead_time * (i + 1))
+            for i in range(self.rollout_step)
+        ]
 
         info = {
             "last_index": last_index,
-            "last_input_end_time": last_input_end,
-            "last_output_time": last_output_time,
+            "last_input_times": last_input_times,
+            "last_output_times": last_output_times,
             "dataset_end_date_hour": self.end_date_hour,
-            "within_bounds": last_output_time <= self.end_date_hour,
+            "within_bounds": last_output_times[-1] <= self.end_date_hour,
         }
 
         return info

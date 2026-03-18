@@ -121,9 +121,8 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
     
     def __len__(self) -> int:
         duration = self.end_date_hour - self.start_date_hour
-        duration_interval = round(duration.total_seconds()) // (60 * 60)
-        total_interval = duration_interval + 1 - self.input_time_window + 1 - self.lead_time * self.rollout_step
-        return total_interval
+        duration_hours = round(duration.total_seconds()) // (60 * 60)
+        return duration_hours - (self.input_time_window - 1 + self.rollout_step) * self.lead_time + 1
 
     def _nc_to_dict(self, upper_nc, sfc_nc) -> dict:
         _d = {
@@ -177,7 +176,7 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> tuple:
         date_hour_inputs = [
-            self.start_date_hour + pd.Timedelta(hours = index + i) \
+            self.start_date_hour + pd.Timedelta(hours = index + i * self.lead_time) \
             for i in range(self.input_time_window)
         ]
         date_hour_outputs = [
@@ -219,3 +218,4 @@ class AuroraTWandERA5TWDatasetforAurora(torch.utils.data.Dataset):
         if self.get_datetime:
             result.append(date_hour_inputs[-1].strftime("%Y-%m-%d %H:%M:%S"))
         return tuple(result)
+
