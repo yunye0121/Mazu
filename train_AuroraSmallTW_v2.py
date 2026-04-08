@@ -7,9 +7,13 @@ import pandas as pd
 import logging
 import shutil
 
+import numpy as np
 import torch
+import torch.serialization
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
+
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
