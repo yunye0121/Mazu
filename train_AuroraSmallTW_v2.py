@@ -13,7 +13,13 @@ import torch.serialization
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+torch.serialization.add_safe_globals([
+    np._core.multiarray.scalar,
+    np.dtypes.Float64DType,
+    np.dtypes.Float32DType,
+    np.dtypes.Int64DType,
+    np.dtypes.Int32DType,
+])
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
