@@ -77,10 +77,12 @@ def parse_args():
 
     parser.add_argument("--Aurora_input_dir", type = str, default = None)
     parser.add_argument("--use_Aurora_input_len", type = int, default = 1)
-    parser.add_argument("--aurora_prob_start", type = float, default = 0.0,
-                        help = "Aurora prediction probability at the first epoch")
-    parser.add_argument("--aurora_prob_end", type = float, default = 1.0,
-                        help = "Aurora prediction probability at the last epoch")
+    parser.add_argument("--mix_ratio_max", type=float, default=0.7,
+                        help="Max prob of using Aurora prediction as input")
+    parser.add_argument("--ramp_end_epoch_ratio", type=float, default=0.7,
+                        help="Epoch (as fraction of total) to reach max mixing")
+    parser.add_argument("--warmup_epochs", type=int, default=10,
+                        help="Epochs before starting mixing")
 
     parser.add_argument("--epochs", type = int, default = 5)
     parser.add_argument("--lr", type = float, default = 1e-3)
@@ -103,10 +105,18 @@ def parse_args():
 
     return parser.parse_args()
 
-def get_aurora_prob_for_epoch(epoch, total_epochs, prob_start, prob_end):
-    if total_epochs <= 1:
-        return prob_end
-    return prob_start + (prob_end - prob_start) * (epoch - 1) / (total_epochs - 1)
+def get_aurora_prob_for_epoch(args, epoch):
+    warmup_epochs = args.warmup_epochs
+    if epoch <= warmup_epochs:
+        return 0.0
+
+    ramp_end_epoch = int(args.epochs * args.ramp_end_epoch_ratio)
+    ramp_length = max(1, ramp_end_epoch - warmup_epochs)
+
+    progress = (epoch - warmup_epochs) / ramp_length
+    progress = min(1.0, progress)
+
+    return progress * args.mix_ratio_max
 
 def create_model(args):
     model = AuroraSmall(
@@ -142,7 +152,7 @@ def create_dataset(args, split):
             rollout_step = args.rollout_step,
             Aurora_input_dir = args.Aurora_input_dir,
             use_Aurora_input_len = args.use_Aurora_input_len,
-            aurora_prob = args.aurora_prob_start,
+            aurora_prob = 0.0,
         )
     elif split == "val":
         ds = ERA5TWDatasetforAurora(
@@ -542,9 +552,7 @@ def main():
                      f"(train_global_step={train_global_step}, val_global_step={val_global_step})")
 
     for epoch in range(starting_epoch, args.epochs + 1):
-        aurora_prob = get_aurora_prob_for_epoch(
-            epoch, args.epochs, args.aurora_prob_start, args.aurora_prob_end,
-        )
+        aurora_prob = get_aurora_prob_for_epoch(args, epoch)
 
         train_loss, train_global_step = train_epoch(
             args,
