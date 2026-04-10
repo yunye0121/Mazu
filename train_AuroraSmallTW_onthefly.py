@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument("--seed", type = int, default = 42)
     parser.add_argument("--use_pretrained_weight", action = "store_true")
     parser.add_argument("--checkpoint_path", type = str, default = None)
+    parser.add_argument("--resume_from_checkpoint", type = str, default = None,
+                        help = "Path to an accelerator checkpoint directory (saved by save_state) to resume training")
     parser.add_argument("--train_start_date_hour", type = str, required = True)
     parser.add_argument("--train_end_date_hour", type = str, required = True)
     parser.add_argument("--val_start_date_hour", type = str, required = True)
@@ -452,11 +454,36 @@ def main():
     model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, val_loader, scheduler)
     if teacher_model: teacher_model = teacher_model.to(accelerator.device)
 
+    # ---- Resume from checkpoint ----
+    starting_epoch = 1
     train_global_step = 0
     val_global_step = 0
     best_ckpts = []
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_from_checkpoint:
+        resume_path = Path(args.resume_from_checkpoint)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+        logger.info(f"Resuming from checkpoint: {resume_path}")
+        accelerator.load_state(str(resume_path))
+
+        dir_name = resume_path.name
+        if dir_name.startswith("checkpoint-"):
+            resumed_epoch = int(dir_name.split("-")[1])
+        else:
+            resumed_epoch = int(dir_name.split("-")[0])
+
+        starting_epoch = resumed_epoch + 1
+        steps_per_train_epoch = len(train_loader)
+        steps_per_val_epoch = len(val_loader)
+        train_global_step = resumed_epoch * steps_per_train_epoch
+        val_global_step = resumed_epoch * steps_per_val_epoch
+
+        logger.info(f"Resumed training — will start from epoch {starting_epoch} "
+                     f"(train_global_step={train_global_step}, val_global_step={val_global_step})")
+
+    for epoch in range(starting_epoch, args.epochs + 1):
         # No teacher update — teacher stays fixed at initial weights
 
         tl, train_global_step = train_epoch(args, model, teacher_model, train_loader, optimizer, scheduler, AuroraMAELoss, accelerator, epoch, train_global_step)
