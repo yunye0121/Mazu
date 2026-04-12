@@ -454,10 +454,6 @@ def main():
             sync_teacher_from_student(model, teacher, accelerator)
 
     for epoch in range(starting_epoch, args.epochs + 1):
-        # Refresh teacher at the start of each epoch so it reflects the last epoch's student.
-        if teacher is not None and epoch > 1:
-            sync_teacher_from_student(model, teacher, accelerator)
-
         tl, train_global_step = train_epoch(args, model, teacher, train_loader, optimizer, scheduler, AuroraMAELoss, accelerator, epoch, train_global_step)
         vl, val_global_step = val_epoch(args, model, val_loader, AuroraMAELoss, accelerator, epoch, val_global_step)
 
@@ -466,6 +462,11 @@ def main():
             logger.info(f"Epoch {epoch}: Train {tl:.6f} Val {vl:.6f}")
             save_checkpoint_by_epoch(args, accelerator, ckpt_dir, epoch)
             best_ckpts = save_checkpoint_best_by_val_loss(args, accelerator, ckpt_dir, epoch, tl, vl, best_ckpts)
+
+        # End-of-epoch: load current student weights into the teacher for use next epoch.
+        if teacher is not None:
+            accelerator.wait_for_everyone()
+            sync_teacher_from_student(model, teacher, accelerator)
 
     accelerator.end_training()
 
