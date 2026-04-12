@@ -450,9 +450,9 @@ def main():
         logger.info(f"Resumed training — will start from epoch {starting_epoch} "
                      f"(train_global_step={train_global_step}, val_global_step={val_global_step})")
 
-        # After resume, realign teacher with the loaded student weights.
-        if teacher is not None:
-            sync_teacher_from_student(model, teacher, accelerator)
+        # [DIAGNOSTIC] teacher sync disabled — keep teacher at init weights to match vanilla onthefly
+        # if teacher is not None:
+        #     sync_teacher_from_student(model, teacher, accelerator)
 
     for epoch in range(starting_epoch, args.epochs + 1):
         tl, train_global_step = train_epoch(args, model, teacher, train_loader, optimizer, scheduler, AuroraMAELoss, accelerator, epoch, train_global_step)
@@ -464,10 +464,10 @@ def main():
             save_checkpoint_by_epoch(args, accelerator, ckpt_dir, epoch)
             best_ckpts = save_checkpoint_best_by_val_loss(args, accelerator, ckpt_dir, epoch, tl, vl, best_ckpts)
 
-        # End-of-epoch: load current student weights into the teacher for use next epoch.
-        if teacher is not None:
-            accelerator.wait_for_everyone()
-            sync_teacher_from_student(model, teacher, accelerator)
+        # [DIAGNOSTIC] teacher sync disabled — keep teacher at init weights to match vanilla onthefly
+        # if teacher is not None:
+        #     accelerator.wait_for_everyone()
+        #     sync_teacher_from_student(model, teacher, accelerator)
 
     accelerator.end_training()
 
