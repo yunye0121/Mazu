@@ -246,7 +246,8 @@ def train_epoch(
             final_input = input_gt
 
             if args.use_onthefly and teacher is not None and (random.random() < current_mix_ratio):
-                with torch.inference_mode():
+                # with torch.inference_mode():
+                with torch.no_grad():
                     self_pred_t1 = teacher(input_prev_step)
                     self_pred_t1.metadata.time = input_gt.metadata.time
                     final_input = self_pred_t1
