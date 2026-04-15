@@ -21,6 +21,7 @@ import numpy as np
 
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
+from aurora.normalisation import scales as aurora_scales
 from datasets.ERA5TWDatasetforAurora_lazy import ERA5TWDatasetforAuroraLazy
 from datasets.ERA5TWTargetIterableDataset import ERA5TWTargetIterableDataset
 from utils.metrics import AuroraMAELoss, AuroraMSELoss
@@ -162,7 +163,7 @@ def parse_args():
     parser.add_argument('--gaussian_noise_std', type = float, default = 0.0,
                         help = "Multiplier on per-variable std; 0 disables noise.")
     parser.add_argument('--noise_scales_json', type = str, default = None,
-                        help = "Path to JSON mapping var_name -> std (and f'{var}_{level}' for atmos vars).")
+                        help = "Optional JSON mapping var_name -> std. If omitted, falls back to aurora.normalisation.scales (physical-unit stds shipped with Aurora).")
 
     return parser.parse_args()
 
@@ -445,11 +446,13 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
 
-    noise_scales = None
     if args.noise_scales_json is not None:
         with open(args.noise_scales_json, "r") as f:
             noise_scales = json.load(f)
         logger.info(f"Loaded noise scales ({len(noise_scales)} entries) from {args.noise_scales_json}")
+    else:
+        noise_scales = dict(aurora_scales)
+        logger.info(f"Using aurora.normalisation.scales as noise scales ({len(noise_scales)} entries).")
     logger.info(f"gaussian_noise_std = {args.gaussian_noise_std}")
 
     model = create_model(args, device)
